@@ -2,6 +2,12 @@
 
 A layered graph workspace for Obsidian. Every edge knows what kind of edge it is.
 
+![The layered graph](docs/graph.png)
+
+*Node labels are blurred: this is the author's own vault. The four groups across
+the top are the layers, and everything under **Maybe** is drawn as a broken line
+because nothing has confirmed it.*
+
 ## The problem
 
 Obsidian's graph view is a hairball for one structural reason: **every edge means
