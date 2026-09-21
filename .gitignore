@@ -1,0 +1,20 @@
+node_modules/
+*.log
+.DS_Store
+
+# Build output — rebuilt from source with `npm run build`
+main.js
+*.js.map
+
+# Never commit an index or plugin state, they contain vault content
+semantic-index.json
+data.json
+demo-vault/.obsidian/
+
+# A local build target, so `npm run build` can write straight into a real
+# vault without the path living in the repo.
+.strata-out
+
+# Python
+__pycache__/
+*.pyc

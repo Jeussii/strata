@@ -1,0 +1,1694 @@
+/* Strata
+   Restraint over decoration. One surface, quiet chrome, generous air.
+   Nothing here draws attention to itself except the graph. */
+
+.strata-root {
+  --strata-chrome: color-mix(in srgb, var(--background-secondary) 70%, var(--background-primary));
+  --strata-hairline: color-mix(in srgb, var(--text-normal) 8%, transparent);
+  --strata-quiet: color-mix(in srgb, var(--text-normal) 45%, transparent);
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------------------------------------------ toolbar */
+
+.strata-toolbar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  padding: 9px 16px;
+  flex: 0 0 auto;
+  background: var(--strata-chrome);
+  border-bottom: 1px solid var(--strata-hairline);
+}
+
+.strata-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.strata-group-right {
+  gap: 6px;
+}
+
+.strata-group-label {
+  font-size: 10px;
+  font-weight: 590;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--strata-quiet);
+  white-space: nowrap;
+}
+
+/* One continuous control rather than four loose buttons, the way a macOS
+   segmented control reads. */
+.strata-seg {
+  display: flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-normal) 5%, transparent);
+}
+
+.strata-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--strata-quiet);
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 130ms ease, color 130ms ease, opacity 130ms ease;
+}
+
+.strata-chip:hover {
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--text-normal) 6%, transparent);
+}
+
+.strata-seg .strata-chip.is-on {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Off means the layer is muted, not gone. Keeps the swatch legible. Mixed is
+   excluded: half a group showing is not the same as none of it. */
+.strata-seg .strata-chip:not(.is-on):not(.is-mixed) .strata-swatch {
+  opacity: 0.28;
+}
+
+.strata-chip-plain {
+  border: 1px solid var(--strata-hairline);
+  padding: 5px 11px;
+}
+
+.strata-chip-plain.is-on {
+  background: color-mix(in srgb, var(--text-normal) 9%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  transition: opacity 130ms ease;
+}
+
+.strata-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.5;
+}
+
+/* ------------------------------------------------------- layers, as groups */
+
+/* The chips stack over their unfolded contents, so opening a group grows the
+   toolbar downward instead of shoving the rest of it sideways. */
+.strata-layers {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+/* When a group is open the toolbar is two lines tall on the left and one on
+   the right; centring against that puts Find halfway down a block it has
+   nothing to do with. */
+.strata-toolbar:has(.strata-sub.is-open) {
+  align-items: flex-start;
+}
+
+/* A group chip is two targets in one pill: the label toggles the group, the
+   caret unfolds it. The padding therefore lives on the children. */
+.strata-group-chip {
+  padding: 0;
+  gap: 0;
+}
+
+.strata-chip-main,
+.strata-chip-more {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  line-height: 1;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+  cursor: pointer;
+  padding: 5px 10px;
+}
+
+.strata-chip-more {
+  padding: 5px 7px 5px 3px;
+  margin-left: -4px;
+  opacity: 0.45;
+  transition: opacity 130ms ease;
+}
+
+.strata-chip-more::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  transform: translateY(-1.5px) rotate(45deg);
+  transition: transform 150ms ease;
+}
+
+.strata-group-chip.is-open .strata-chip-more::after {
+  transform: translateY(1px) rotate(225deg);
+}
+
+.strata-chip-more:hover,
+.strata-group-chip.is-open .strata-chip-more {
+  opacity: 1;
+}
+
+/* Some of the group is showing, not all of it — the state the grouping would
+   otherwise hide. It gets no pill style of its own, because it does not need
+   one: the swatch has already dropped the band belonging to whatever is off,
+   and the count has switched to how many edges are actually drawn. Three
+   invented shades of "partly on" would have been a new vocabulary to learn in
+   place of two numbers that already say it. */
+.strata-seg .strata-chip.is-mixed {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.strata-seg .strata-chip.is-off .strata-swatch {
+  opacity: 0.28;
+}
+
+/* One group's layers, unfolded. Smaller and inset, so it reads as contents of
+   the chip above rather than a second row of equals. */
+.strata-sub {
+  display: none;
+  gap: 4px;
+  padding-left: 10px;
+}
+
+.strata-sub.is-open {
+  display: flex;
+}
+
+/* These have to out-specify Obsidian's own `button` rules, which were painting
+   on and off identically and leaving the label colour as the only difference. */
+.strata-sub .strata-layer-chip {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  border: 1px solid transparent;
+}
+
+.strata-sub .strata-layer-chip.is-on {
+  background: var(--background-primary);
+  border-color: var(--strata-hairline);
+  color: var(--text-normal);
+}
+
+.strata-sub .strata-layer-chip:not(.is-on) .strata-swatch {
+  opacity: 0.28;
+}
+
+.strata-select {
+  font-size: 12px;
+  font-family: inherit;
+  padding: 4px 8px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--strata-hairline);
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.strata-topic {
+  max-width: 150px;
+}
+
+.strata-search {
+  font-size: 12px;
+  font-family: inherit;
+  width: 130px;
+  padding: 4px 9px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--strata-hairline);
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.strata-search::placeholder {
+  color: var(--strata-quiet);
+}
+
+/* -------------------------------------------------------------------- stage */
+
+.strata-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.strata-canvas {
+  position: absolute;
+  inset: 0;
+  background: var(--background-primary);
+}
+
+.strata-foot {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 14px;
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  pointer-events: none;
+  font-size: 11px;
+}
+
+.strata-status {
+  color: color-mix(in srgb, var(--text-normal) 34%, transparent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Reads out what an edge means while the cursor is on it. */
+.strata-readout {
+  color: var(--text-muted);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------- legend */
+
+/* Reference, not content. It sits in its own surface so it stops competing with
+   the graph for the same visual plane, and it recedes until looked at — the
+   graph is the thing, the legend only explains it. */
+/* --------------------------------------------------------------- the key */
+
+/* What the colours mean, and the switch for what they mean, as one object.
+   The old version put `opacity: 0.62` on the container — which faded the
+   labels you have to read by exactly as much as the chrome that should
+   recede, then the per-element tokens underneath faded them again. Recession
+   comes from size and from the theme's own faint token now. Nothing here is
+   hidden behind hover; hover only quiets the canvas behind it. */
+.strata-key {
+  position: absolute;
+  left: 16px;
+  bottom: 46px;
+  width: 210px;
+  padding: 10px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 11.5px;
+  line-height: 1.45;
+  pointer-events: auto;
+  transition: background 180ms ease, border-color 180ms ease;
+}
+
+.strata-key:hover {
+  border-color: var(--strata-hairline);
+  background: color-mix(in srgb, var(--background-primary) 78%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* The question the colours are answering, in words. A fixed height, because
+   it doubles as the read-out when a row is hovered and nothing below it may
+   move when it changes. */
+.strata-key-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 15px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.strata-key-held {
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strata-key-head .strata-key-clear {
+  padding: 0 3px;
+  font-size: 13px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.strata-key-head .strata-key-clear:hover { color: var(--text-normal); }
+
+.strata-key-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.strata-key-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  height: 20px;
+  padding: 0 6px;
+  margin: 0 -6px;
+  border-radius: 5px;
+  white-space: nowrap;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.strata-key-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strata-key-count {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.strata-key-row:hover {
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-key-row.is-on {
+  background: color-mix(in srgb, var(--text-accent) 15%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-key-row.is-on .strata-key-count { color: var(--text-normal); }
+
+/* Each mark is the shape the canvas actually draws, so the key reads against
+   the picture instead of being memorised. */
+.strata-key-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  justify-self: center;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.strata-key-mark.is-unset { background: none; border: 1px solid var(--strata-quiet); }
+.strata-key-mark.is-topic { background: none; border: 2px solid currentColor; }
+.strata-key-mark.is-source { width: 8px; height: 7px; border-radius: 2px; }
+.strata-key-mark.is-session { width: 8px; height: 8px; }
+.strata-key-mark.is-foreign { background: none; border: 1.5px dashed currentColor; }
+
+/* Everything that is not a note: one wrapped line of visibly secondary text
+   rather than five more rows of equal weight. These are learned once. */
+/* Two aligned columns, not a wrapped run. Wrapping broke wherever the text
+   ran out, so no two marks lined up and five items read as five fragments. */
+.strata-key-also {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px 8px;
+  padding-top: 7px;
+  margin-top: 3px;
+  border-top: 1px solid var(--strata-hairline);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.strata-key-also-item {
+  display: grid;
+  grid-template-columns: 9px 1fr auto;
+  align-items: center;
+  gap: 5px;
+  height: 17px;
+  padding: 0 4px;
+  margin: 0 -4px;
+  border-radius: 4px;
+  cursor: pointer;
+  min-width: 0;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.strata-key-also-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strata-key-also .strata-key-mark { justify-self: center; }
+
+.strata-key-also-item:hover {
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-key-also-item.is-on {
+  background: color-mix(in srgb, var(--text-accent) 15%, transparent);
+  color: var(--text-normal);
+}
+
+/* The four colour modes, painted like the layer chips one axis up, so they
+   read as the same kind of control rather than a new invention. */
+.strata-key-modes {
+  display: flex;
+  gap: 2px;
+  margin: 1px -5px 0;
+}
+
+/* Out-specifies Obsidian's own `button` rules, which otherwise paint all four
+   tabs alike and make every mode look selected. */
+.strata-key-modes .strata-key-mode {
+  font-size: 10.5px;
+  font-family: inherit;
+  line-height: 1;
+  padding: 4px 5px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.strata-key-modes .strata-key-mode:hover {
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--text-normal) 6%, transparent);
+}
+
+.strata-key-modes .strata-key-mode.is-on {
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--text-normal) 9%, transparent);
+}
+
+/* A date is continuous, so it gets a ramp and not invented buckets. The
+   gradient is painted in JS from `recencyColour` itself — the hard-coded
+   stops that used to live here were the light-theme values and stayed wrong
+   in the dark one. */
+.strata-key-ramp {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 3px 0 1px;
+}
+
+.strata-key-gradient {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.strata-key-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
+  color: var(--text-faint);
+}
+
+/* Says what the rows do, and only while you are looking at them. Fixed
+   height, so revealing it moves nothing. */
+.strata-key-hint {
+  height: 13px;
+  font-size: 10px;
+  color: var(--text-faint);
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.strata-key:hover .strata-key-hint { opacity: 1; }
+
+.strata-linker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.strata-linker-input {
+  width: 100%;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 9px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--strata-hairline);
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.strata-linker-input:focus {
+  border-color: color-mix(in srgb, var(--text-accent) 55%, transparent);
+  outline: none;
+}
+
+.strata-linker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 172px;
+  overflow-y: auto;
+}
+
+.strata-linker-list:empty {
+  display: none;
+}
+
+.strata-linker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.strata-linker-row.is-on {
+  background: color-mix(in srgb, var(--text-normal) 8%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-linker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strata-tag.is-quiet {
+  opacity: 0.55;
+}
+
+
+
+
+
+
+/* --------------------------------------------------------------------- card */
+
+.strata-card {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 248px;
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--strata-hairline);
+  background: color-mix(in srgb, var(--background-primary) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.strata-card.is-open {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.strata-card-head {
+  position: sticky;
+  top: -14px;
+  z-index: 2;
+  margin: -14px -16px 9px;
+  padding: 14px 16px 8px;
+  /* Solid, not the card's translucency: a sticky element over a
+     backdrop-filter re-samples as it scrolls and bands visibly in Electron. */
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--strata-hairline);
+}
+
+.strata-card h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-normal);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* One line of grey, not three pills. A pill reads as a thing you can press,
+   and none of these were. */
+.strata-card-facts {
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
+
+.strata-tag {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  color: var(--text-muted);
+}
+
+.strata-card-sub {
+  font-size: 11px;
+  color: var(--strata-quiet);
+  margin-bottom: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Connections, two to a line. The mark is the layer's real line — this used
+   to be written as `strata-legend-line`, a class with no rule anywhere in the
+   stylesheet, so the card's colours have been invisible for as long as the
+   block existed. */
+.strata-card-conn {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  margin-bottom: 9px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.strata-card-conn-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.strata-card-conn-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strata-card-conn-n { color: var(--text-faint); margin-left: auto; }
+
+.strata-card-line {
+  width: 13px;
+  height: 0;
+  flex: 0 0 auto;
+  border-top: 2px solid currentColor;
+}
+
+.strata-card-line.is-dashed { border-top-style: dashed; }
+.strata-card-line.is-dotted { border-top-style: dotted; }
+
+/* The one row of actions, ranked. Everything used to be a full-width button
+   in a stack, which gave "Split into atoms" the same weight as the thing you
+   opened the card for. */
+.strata-card-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.strata-card-actions .strata-open { width: auto; margin: 0; }
+
+.strata-open.is-primary {
+  flex: 1 1 auto;
+  background: color-mix(in srgb, var(--text-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--text-accent) 30%, transparent);
+  color: var(--text-accent);
+}
+
+.strata-open.is-primary:hover {
+  background: color-mix(in srgb, var(--text-accent) 20%, transparent);
+}
+
+.strata-open.is-ghost {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.strata-open.is-more {
+  flex: 0 0 auto;
+  width: 28px;
+  padding: 6px 0;
+  border-color: transparent;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.strata-open.is-more.is-on {
+  background: color-mix(in srgb, var(--text-normal) 9%, transparent);
+  color: var(--text-normal);
+}
+
+/* Rare actions, expanded in place. Never a popover — one surface is the
+   premise of this whole view, and a menu floating over the graph is a second
+   one. An item is here because it is rare, not because the card got full. */
+.strata-card-more {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+}
+
+.strata-card-more-item {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 7px;
+  margin: 0 -7px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.strata-card-more-item:hover {
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-card-more-line {
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--text-accent);
+  cursor: pointer;
+}
+
+.strata-card-more-line:hover { text-decoration: underline; }
+
+/* Suggestions: a name and two targets, not two full-width buttons each. The
+   words they used to carry moved into the tooltip. */
+.strata-card-suggests { margin-top: 9px; }
+
+.strata-card-suggest {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+}
+
+.strata-card-suggest-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strata-card .strata-icon {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  border: 1px solid var(--strata-hairline);
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.strata-card .strata-icon:hover { background: color-mix(in srgb, var(--text-normal) 8%, transparent); color: var(--text-normal); }
+.strata-card .strata-icon.is-quiet { border-color: transparent; }
+
+/* The compound block only exists once its one-line summary is clicked. */
+.strata-compound { display: none; }
+.strata-compound.is-open { display: block; }
+
+.strata-open-quiet {
+  color: var(--strata-quiet);
+}
+
+.strata-open + .strata-open,
+.strata-card-actions + .strata-open {
+  margin-top: 0;
+}
+
+.strata-open {
+  width: 100%;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  padding: 6px;
+  border-radius: 7px;
+  border: 1px solid var(--strata-hairline);
+  background: transparent;
+  color: var(--text-normal);
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 130ms ease;
+}
+
+.strata-open:hover {
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+}
+
+/* ------------------------------------------------------------------ picker */
+
+.strata-pick-title {
+  font-size: 13px;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strata-pick-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.strata-pick-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- the local model ---- */
+
+/* The one control that reaches out to a process. Marked, so it is never
+   confused with the filters, which only ever rearrange what is already here. */
+.strata-chip-model.is-on {
+  border-color: color-mix(in srgb, var(--text-accent) 55%, transparent);
+  color: var(--text-accent);
+}
+.strata-chip-model.is-working {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* A semantic finding is about two notes, not one, so the card names both and
+   makes each openable rather than picking a side. */
+.strata-card-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 8px;
+}
+.strata-card-pairrow {
+  all: unset;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-normal);
+  padding: 3px 6px;
+  border-radius: 5px;
+  transition: background 120ms ease;
+}
+.strata-card-pairrow:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* The working, shown. Without this the card is a number asking to be trusted. */
+.strata-card-words {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 2px;
+}
+.strata-word {
+  font-size: 10.5px;
+  line-height: 1.6;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-modifier-hover);
+}
+
+/* ---- capture ---- */
+
+.strata-capture-modal { max-width: 620px; }
+
+.strata-capture-input {
+  width: 100%;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--background-primary-alt);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+}
+
+.strata-capture-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 10px 2px;
+}
+.strata-capture-hint.is-clear { color: var(--text-muted); }
+
+/* The verdict leads, because the whole point is to be told before writing. */
+.strata-capture-verdict {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  padding: 10px 2px 4px;
+}
+.strata-capture-verdict.is-duplicate { color: var(--text-accent); }
+
+.strata-capture-hit {
+  border-top: 1px solid var(--background-modifier-border);
+  padding: 9px 2px;
+}
+.strata-capture-hithead {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.strata-capture-name { font-size: 12.5px; font-weight: 600; color: var(--text-normal); }
+.strata-capture-section { font-size: 11px; color: var(--text-faint); }
+.strata-capture-preview {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 5px 0 7px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.strata-capture-actions { display: flex; gap: 6px; }
+.strata-capture-actions .strata-open { margin: 0; width: auto; padding: 4px 10px; font-size: 11px; }
+
+.strata-capture-new {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.strata-capture-newlabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.strata-capture-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.strata-capture-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+.strata-word.is-removable { cursor: pointer; border: none; }
+.strata-word.is-removable:hover { color: var(--text-normal); }
+
+/* ---- what the model actually matched ---- */
+
+.strata-card-quotes { margin: 9px 0 3px; display: flex; flex-direction: column; gap: 7px; }
+.strata-quote {
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: 9px;
+}
+.strata-quote-from {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+/* A quote that knows where it came from is a link, and should look like one
+   the moment the cursor is over it — the passage is the destination, not the
+   file. Blocks with no heading behind them stay inert rather than lying. */
+.strata-quote.is-linked {
+  cursor: pointer;
+  border-radius: 7px;
+  margin: 0 -6px;
+  padding: 4px 6px;
+  transition: background 120ms ease;
+}
+
+.strata-quote.is-linked:hover {
+  background: color-mix(in srgb, var(--text-normal) 6%, transparent);
+}
+
+.strata-quote.is-linked:hover .strata-quote-from {
+  color: var(--text-accent);
+}
+
+.strata-quote-text {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---- one note that is several ---- */
+
+.strata-compound {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.strata-compound-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-accent);
+  margin-bottom: 3px;
+}
+.strata-compound-list {
+  margin: 7px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.strata-compound-section {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  padding-left: 9px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+.strata-compound-foot { font-size: 10.5px; opacity: 0.75; }
+
+/* ---- hover explanations ---- */
+
+/* The native `title` tooltip waits a second and renders in a font that belongs
+   to no design. A layer whose entire job is to answer a question should not
+   make you wait to find out which question. */
+.strata-tip {
+  position: absolute;
+  z-index: 40;
+  max-width: 280px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--strata-hairline);
+  background: color-mix(in srgb, var(--background-primary) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.16);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+  transition: opacity 130ms ease, transform 130ms ease;
+}
+
+.strata-tip.is-open {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ---- spread ---- */
+
+/* The relation, once it has been read. Sits between the quotes and the
+   actions, because it is what decides which action is right. */
+.strata-aspect {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 10px 0 2px;
+}
+
+.strata-aspect.is-read {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-normal) 5%, transparent);
+}
+
+.strata-aspect-verdict {
+  font-size: 12px;
+  font-weight: 590;
+  color: var(--text-normal);
+}
+
+.strata-aspect-why {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* ----------------------------------------------------------- view popover */
+
+/* Preferences, out of the way until asked for. Nine controls living on the
+   toolbar made the chrome compete with the graph; these are set once and then
+   left alone, so they belong behind a button. */
+.strata-settings {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 16px;
+  z-index: 40;
+  width: 268px;
+  display: none;
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px 14px 15px;
+  border-radius: 12px;
+  border: 1px solid var(--strata-hairline);
+  background: color-mix(in srgb, var(--background-primary) 92%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.16);
+}
+
+.strata-settings.is-open {
+  display: flex;
+}
+
+.strata-settings-head {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--text-normal) 28%, transparent);
+}
+
+/* Label left, control right, on one baseline — so the eye reads a list of
+   settings rather than a scatter of widgets. */
+.strata-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.strata-row .strata-group-label,
+.strata-row-label {
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  font-weight: 450;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.strata-row .strata-select {
+  flex: 0 1 132px;
+  max-width: 132px;
+}
+
+.strata-row-value {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  width: 30px;
+  text-align: right;
+  flex: 0 0 auto;
+}
+
+.strata-force .strata-range {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  height: 16px;
+}
+
+.strata-row-btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.strata-range {
+  width: 62px;
+  height: 16px;
+}
+
+.strata-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 74px;
+  height: 18px;
+  background: none;
+  cursor: ew-resize;
+}
+
+.strata-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-normal) 14%, transparent);
+}
+
+.strata-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--background-primary);
+  border: 1px solid color-mix(in srgb, var(--text-normal) 34%, transparent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.strata-range:hover::-webkit-slider-thumb {
+  border-color: color-mix(in srgb, var(--text-normal) 55%, transparent);
+}
+
+/* ---- the split workspace ---- */
+
+.strata-split-modal { max-width: 760px; }
+
+.strata-split-head { padding-bottom: 10px; border-bottom: 1px solid var(--background-modifier-border); }
+.strata-split-head h3 { margin: 0 0 3px; }
+.strata-split-sub { font-size: 11.5px; color: var(--text-muted); }
+.strata-split-actions { display: flex; gap: 6px; margin-top: 10px; }
+.strata-chip-plain.is-working { opacity: 0.65; pointer-events: none; }
+
+.strata-split-list {
+  max-height: 52vh;
+  overflow-y: auto;
+  margin: 4px -4px 0;
+  padding: 0 4px;
+}
+
+.strata-split-row {
+  padding: 11px 0 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  transition: opacity 140ms ease;
+}
+/* A dropped passage is still shown, just visibly not coming with you. */
+.strata-split-row.is-drop { opacity: 0.4; }
+.strata-split-row.is-merge { padding-left: 22px; border-left: 2px solid var(--background-modifier-border); }
+
+.strata-split-bar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+
+.strata-split-state {
+  all: unset;
+  cursor: pointer;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--text-faint);
+  border: 1px solid var(--strata-hairline);
+  transition: background 120ms ease, color 120ms ease;
+}
+.strata-split-state:hover { color: var(--text-muted); }
+.strata-split-state.is-on {
+  background: color-mix(in srgb, var(--text-normal) 9%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-split-heading {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-left: 4px;
+}
+
+.strata-split-fields { display: flex; gap: 6px; margin: 9px 0 0; flex-wrap: wrap; }
+
+.strata-split-title {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--strata-hairline);
+  background: var(--background-primary-alt);
+  color: var(--text-normal);
+}
+
+.strata-split-text {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  margin-top: 8px;
+  max-height: 78px;
+  overflow-y: auto;
+  padding-left: 9px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.strata-split-foot {
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.strata-split-note { font-size: 11px; color: var(--text-faint); }
+.strata-split-note.is-warn { color: var(--text-accent); }
+.strata-split-foot .strata-open { margin-top: 9px; }
+.strata-split-foot .strata-open:disabled { opacity: 0.4; pointer-events: none; }
+
+/* ---- findings ---- */
+
+/* A queue, not a canvas. Some findings are shaped like a graph and some are
+   shaped like a list, and forcing the second kind into the first is what made
+   the graph feel chaotic. */
+/* The findings queue, as a panel inside the graph rather than a tab of its
+   own. Slides over the canvas from the right: wide enough that a pair of
+   titles and both matching passages read as one row, narrow enough that the
+   shape you are acting on stays visible beside it. */
+.strata-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 46%);
+  z-index: 30;
+  border-left: 1px solid var(--strata-hairline);
+  background: color-mix(in srgb, var(--background-primary) 92%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.10);
+  transform: translateX(100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 180ms cubic-bezier(0.32, 0.72, 0, 1), opacity 140ms ease;
+}
+
+.strata-panel.is-open {
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.strata-find-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 10px;
+}
+
+.strata-find-close {
+  all: unset;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--strata-quiet);
+}
+
+.strata-find-close:hover {
+  background: color-mix(in srgb, var(--text-normal) 8%, transparent);
+  color: var(--text-normal);
+}
+
+.strata-panel .strata-seg {
+  flex-wrap: wrap;
+}
+
+.strata-panel {
+  /* The same tokens the graph root defines. Redundant while the panel sits
+     inside `.strata-root`, and kept anyway: eighteen rules read these — every
+     chip border, every quiet label — and when this was a separate view they
+     resolved to nothing at all, because the variables were only ever declared
+     on the graph root. A shared component carries its own tokens. */
+  --strata-chrome: color-mix(in srgb, var(--background-secondary) 70%, var(--background-primary));
+  --strata-hairline: color-mix(in srgb, var(--text-normal) 8%, transparent);
+  --strata-quiet: color-mix(in srgb, var(--text-normal) 45%, transparent);
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+}
+
+.strata-find-head {
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--strata-hairline, var(--background-modifier-border));
+}
+
+.strata-find-blurb {
+  margin-top: 9px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: 62ch;
+}
+
+.strata-find-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 20px 32px;
+}
+
+.strata-find-row {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.strata-find-row.is-compact { padding: 8px 0; }
+
+.strata-find-rowhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.strata-find-name {
+  all: unset;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-normal);
+  border-bottom: 1px solid transparent;
+}
+.strata-find-name:hover { border-bottom-color: var(--text-faint); }
+
+/* Two names in a row are a pair, so the second reads as the other half. */
+.strata-find-rowhead .strata-find-name + .strata-find-name::before {
+  content: "↔";
+  color: var(--text-faint);
+  font-weight: 400;
+  margin-right: 8px;
+}
+
+/* Wraps, and each button gives way rather than running off the edge. A real
+   vault produces button labels like "Keep long-document-draft-v2", and two of
+   them side by side do not fit a 420px panel. */
+.strata-find-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.strata-find-actions .strata-open {
+  margin: 0;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+  padding: 5px 12px;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strata-find-empty {
+  padding: 40px 0;
+  font-size: 12px;
+  color: var(--text-faint);
+  max-width: 52ch;
+}
+
+.strata-webchat-hits { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
+.strata-webchat-hits .strata-find-name { padding: 3px 0; font-weight: 450; }
+
+/* The Find box answers "nothing matched" itself, so the graph does not have to
+   say it by fading to nothing — which read as "this is not in your vault". */
+.strata-search.is-no-match {
+  border-color: var(--text-error);
+  color: var(--text-error);
+}
+
+/* A suggestion is a question waiting for an answer, so the card asks it where
+   the sentence already is rather than on a one-pixel dashed edge. */
+.strata-suggest {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.strata-suggest-name {
+  font-size: 12px;
+  color: var(--text-normal);
+  margin-bottom: 6px;
+  word-break: break-word;
+}
+.strata-suggest-buttons {
+  display: flex;
+  gap: 6px;
+}
+.strata-suggest-buttons .strata-open {
+  flex: 1;
+  margin: 0;
+}
+
+/* An active Find query dims the whole graph until it is cleared, so it needs a
+   visible way out — not just Escape, which you have to already know about. */
+.strata-find { position: relative; }
+.strata-search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  padding: 0 6px;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.strata-search-clear.is-on { display: block; }
+.strata-search-clear:hover { color: var(--text-normal); }
+/* Keep the query clear of the × when one is showing. */
+.strata-find .strata-search { padding-right: 22px; }
+
+/* Sessions tab: a list you tick, not a modal you reopen. */
+.strata-sess-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.strata-sess-bar .strata-search { flex: 1; }
+.strata-sess-add { margin: 0; white-space: nowrap; }
+.strata-sess-add:disabled { opacity: 0.45; cursor: default; }
+.strata-sess-rows { display: flex; flex-direction: column; gap: 2px; }
+.strata-sess {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 7px 8px; border-radius: 6px; cursor: pointer;
+}
+.strata-sess:hover { background: var(--background-modifier-hover); }
+.strata-sess.is-picked { background: var(--background-modifier-active-hover); }
+.strata-sess-box { margin-top: 3px; flex: none; }
+.strata-sess-text { min-width: 0; }
+.strata-sess-title { font-size: 13px; color: var(--text-normal); }
+.strata-sess-meta { display: flex; gap: 10px; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.strata-sess-meta span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Semantic results: a ranked list under the box, because a highlight in a
+   200-node graph is a hunt rather than an answer. */
+.strata-results {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 420px;
+  max-height: 60vh;
+  overflow-y: auto;
+  z-index: 40;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+.strata-results.is-open { display: block; }
+.strata-result-note { padding: 8px 9px; font-size: 12px; color: var(--text-muted); }
+.strata-result { padding: 8px 9px; border-radius: 7px; cursor: pointer; }
+.strata-result:hover { background: var(--background-modifier-hover); }
+.strata-result-head { display: flex; align-items: baseline; gap: 7px; }
+.strata-result-name { font-size: 13px; color: var(--text-normal); }
+.strata-result-heading { font-size: 11px; color: var(--text-accent); }
+.strata-result-score { margin-left: auto; font-size: 11px; color: var(--text-faint); }
+.strata-result-preview {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Overview: grouped by what a number actually is — a queue, a choice, or weather. */
+.strata-over-group {
+  margin: 12px 0 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.strata-over-group:first-child { margin-top: 2px; }
+.strata-over { padding: 8px 9px; border-radius: 7px; cursor: pointer; }
+.strata-over:hover { background: var(--background-modifier-hover); }
+.strata-over.is-clear { cursor: default; opacity: 0.5; }
+.strata-over.is-clear:hover { background: none; }
+.strata-over-head { display: flex; align-items: baseline; gap: 8px; }
+.strata-over-n { font-size: 17px; font-variant-numeric: tabular-nums; color: var(--text-normal); }
+.strata-over-label { font-size: 13px; color: var(--text-normal); }
+.strata-over-line { margin-top: 2px; font-size: 11px; line-height: 1.45; color: var(--text-muted); }
+
+/* The chip swatch draws the layer's real line — colour and style — so the
+   Edges legend has nothing left to add. */
+.strata-swatch.is-line {
+  width: 13px;
+  height: 0;
+  border-radius: 0;
+  background: none;
+  border-top: 2px solid currentColor;
+  align-self: center;
+}
+.strata-swatch.is-line.is-dashed { border-top-style: dashed; }
+.strata-swatch.is-line.is-dotted { border-top-style: dotted; }
+
+/* A group's line is its members' colours in bands. Not four legible swatches —
+   at chip size that is decoration wearing a key's clothes. It says "several
+   lines, roughly these colours"; the exact line is on the per-layer chip. */
+.strata-swatch.is-line.is-multi {
+  width: 18px;
+  height: 2px;
+  border-top: none;
+  background-repeat: no-repeat;
+}
+
+.strata-swatch.is-line.is-multi.is-dashed {
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 3px, transparent 3px 6px);
+  mask-image: repeating-linear-gradient(90deg, #000 0 3px, transparent 3px 6px);
+}
+
+/* Search sits apart from the actions. It is not one of them. */
+.strata-find { margin-left: auto; }
