@@ -1082,6 +1082,12 @@ export class StrataView extends ItemView {
       });
     }
 
+    // Keep where he was looking. A render rebuilds cytoscape from scratch, and
+    // a fresh instance comes up at zoom 1, pan 0 — so without this, every
+    // background re-read of a note and every file saved in another pane
+    // snapped the view back to fit, and a zoomed-in reading of one corner of
+    // the graph never survived more than a few seconds.
+    const view = this.fitted && this.cy ? { zoom: this.cy.zoom(), pan: { ...this.cy.pan() } } : null;
     this.cy?.destroy();
     this.cy = cytoscape({
       container: this.canvasEl,
@@ -1136,7 +1142,12 @@ export class StrataView extends ItemView {
     // the graph rearranged itself when a layer was toggled. Where a node sits is
     // now decided once, by the simulation, and only Re-layout asks again.
 
-    this.fitViewport();
+    if (view) {
+      this.cy.viewport({ zoom: view.zoom, pan: view.pan });
+      this.applyLabelPolicy();
+    } else {
+      this.fitViewport();
+    }
   }
 
   private bindInteractions() {

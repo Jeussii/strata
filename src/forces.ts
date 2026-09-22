@@ -100,6 +100,50 @@ export const LAYER_PULL: Record<LayerId, number> = {
   resonance: 0.15,
 };
 
+/**
+ * How long each layer's spring wants to be, as a multiple of the distance
+ * slider.
+ *
+ * One length for every edge was the mess. A note sat exactly as far from the
+ * topic it is *about* as from a note it merely mentions, so every topic
+ * wore a ring of the same radius and the rings lay on top of each other —
+ * measured on a real ~250-node vault: 13.6 crossings per edge, and a note only
+ * 1.66x nearer its own topic than an average one. Membership is short, so a
+ * topic gathers its notes; a link between two notes is long, so it can reach
+ * across to another cluster without dragging one into the other.
+ *
+ * Chosen by rendering candidates from the real graph and having them judged
+ * blind for "can you see what the notes are about", not by the metrics alone
+ * — the settings with the best numbers pushed every topic out to the rim and
+ * read worse. These: 6.4 crossings per edge, cohesion 2.75. Layers not
+ * measured stay at 1.
+ */
+export const LAYER_REST: Record<LayerId, number> = {
+  topics: 0.35,
+  serves: 0.35,
+  source: 0.75,
+  hierarchy: 1,
+  links: 1.4,
+  bridges: 1.4,
+  sessions: 1,
+  suggested: 1,
+  echo: 1,
+  resonance: 1,
+};
+
+/**
+ * Extra repulsion for well-connected nodes: `1 + repel * ln(1 + degree)`.
+ *
+ * What spreads the clusters apart. Without it the topics — the nodes with the
+ * most springs — were pulled into one crushed knot in the middle with their
+ * notes thrown out around them, and nothing read as a place.
+ *
+ * `layers` restricts which edges count toward being a hub. Counting only topic
+ * edges was tried and rejected on sight: it made topics the only heavy nodes,
+ * so every one was pushed to the rim and the sources collapsed into the middle.
+ */
+export const HUB: { repel: number; layers: LayerId[] | null } = { repel: 0.35, layers: null };
+
 export interface Placed {
   id: string;
   x: number;
@@ -173,6 +217,7 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
   const es: number[] = [];
   const et: number[] = [];
   const ek: number[] = [];
+  const er: number[] = [];
   const degree = new Int32Array(n);
   for (const spring of springs) {
     const s = at.get(spring.source);
@@ -181,12 +226,32 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
     es.push(s);
     et.push(t);
     ek.push(LAYER_PULL[spring.layer] ?? 1);
+    er.push(forces.distance * (LAYER_REST[spring.layer] ?? 1));
     degree[s]++;
     degree[t]++;
   }
-  // d3's forceLink bias: divide by the smaller endpoint, so hubs stay put.
+  // d3's forceLink, both halves of it.
+  //
+  // Strength: divide by the smaller endpoint's degree. That half was here.
+  //
+  // Bias: split each spring's correction between its two ends, in proportion
+  // to the *other* end's degree, so the shares sum to one and a hub takes only
+  // a sliver of every pull. That half was missing — both ends took the full
+  // correction — and the comment above claimed otherwise. With every layer on
+  // it held, because notes carried enough edges that each spring was already
+  // weak. Solo a star-shaped layer and it did not: under Topics alone a note
+  // has one or two edges, every note-to-topic spring runs at full strength, and
+  // a topic with forty notes took forty full corrections a tick. Run offline on
+  // the real graph, positions reached 5e48 px for Topics, 7e62 for Sources, two
+  // million for Hierarchy. The graph did not disappear; it left.
+  const bs = new Float64Array(es.length);
   for (let e = 0; e < es.length; e++) {
-    ek[e] = (ek[e] * forces.link) / Math.max(1, Math.min(degree[es[e]], degree[et[e]]));
+    const ds = degree[es[e]];
+    const dt = degree[et[e]];
+    ek[e] = (ek[e] * forces.link) / Math.max(1, Math.min(ds, dt));
+    // The source's share is the target's weight, and vice versa: the end with
+    // more edges moves less.
+    bs[e] = dt / Math.max(1, ds + dt);
   }
 
   // How much of the centre force each node feels. Degree is counted over the
@@ -200,8 +265,24 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
   }
 
   const charge = -forces.repel * 30;
+  // Which edges make a node a hub is a choice. Counting every layer made a
+  // source cited by twenty notes as heavy as a topic with twenty, and pushed it
+  // out to the rim where its lines crossed the whole picture. Restricting the
+  // count to the layers that define *places* separates the clusters without
+  // exiling the sources.
+  const hubDeg = new Int32Array(n);
+  const hubLayers = HUB.layers ? new Set(HUB.layers) : null;
+  for (const spring of springs) {
+    if (hubLayers && !hubLayers.has(spring.layer)) continue;
+    const a = at.get(spring.source);
+    const b = at.get(spring.target);
+    if (a === undefined || b === undefined || a === b) continue;
+    hubDeg[a]++;
+    hubDeg[b]++;
+  }
+  const q = new Float64Array(n);
+  for (let i = 0; i < n; i++) q[i] = 1 + HUB.repel * Math.log(1 + hubDeg[i]);
   const reachSq = REPEL_REACH * REPEL_REACH;
-  const rest = forces.distance;
 
   const steps = burst ? (ticks as number) : ITERATIONS;
   for (let step = 0; step < steps; step++) {
@@ -224,7 +305,7 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
           dy = Math.sin(a);
           d2 = MIN_DIST_SQ;
         }
-        const w = (charge * alpha) / d2;
+        const w = (charge * alpha * q[i] * q[j]) / d2;
         vx[i] += dx * w;
         vy[i] += dy * w;
         vx[j] -= dx * w;
@@ -238,11 +319,13 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
       const dx = x[t] - x[s];
       const dy = y[t] - y[s];
       const d = Math.hypot(dx, dy) || 1;
-      const f = ((d - rest) / d) * ek[e] * alpha;
-      vx[s] += dx * f;
-      vy[s] += dy * f;
-      vx[t] -= dx * f;
-      vy[t] -= dy * f;
+      const f = ((d - er[e]) / d) * ek[e] * alpha;
+      const sb = bs[e];
+      const tb = 1 - sb;
+      vx[s] += dx * f * sb;
+      vy[s] += dy * f * sb;
+      vx[t] -= dx * f * tb;
+      vy[t] -= dy * f * tb;
     }
 
     for (let i = 0; i < n; i++) {

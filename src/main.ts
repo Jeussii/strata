@@ -81,7 +81,7 @@ const DEFAULT_DATA: StrataData = {
   positions: {},
   linkedSessions: {},
   semantic: DEFAULT_SEMANTIC,
-  layoutVersion: 10,
+  layoutVersion: 11,
   forces: DEFAULT_FORCES,
   writer: "qwen3:8b",
   dismissed: [],
@@ -201,7 +201,16 @@ export default class StrataPlugin extends Plugin {
     // last of those is computed from a graph that does not exist. Re-render
     // when it settles, and see `keepPosition` in the view for what is refused
     // until then.
-    this.registerEvent(this.app.metadataCache.on("resolved", () => this.refreshViews()));
+    // Only until the first time it completes. After that, the vault's own
+    // create / modify / rename / delete events below keep the graph current,
+    // and a full re-render on every `resolved` — which fires whenever the cache
+    // drains, i.e. after nearly any save — was rebuilding the view far more
+    // often than anything had changed.
+    const onResolved = this.app.metadataCache.on("resolved", () => {
+      this.refreshViews();
+      this.app.metadataCache.offref(onResolved);
+    });
+    this.registerEvent(onResolved);
 
     this.app.workspace.onLayoutReady(() => {
       sweepRetired();
