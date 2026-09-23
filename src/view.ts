@@ -23,7 +23,7 @@ import { WebChatModal } from "./webchat";
 import { compound, segment } from "./segment";
 import { bridgeTo, linkTo } from "./write";
 import { FindingsPanel, Tab } from "./findings";
-import { ForceSettings, LOOSE_FLOOR, Placed, Spring, simulate, park } from "./forces";
+import { Anchors, ForceSettings, LOOSE_FLOOR, Placed, Spring, simulate, park } from "./forces";
 import { PROVIDER_COLOURS, PROVIDER_LABELS, providerMark } from "./marks";
 import { RELATION_LABEL, judge, pairKey } from "./aspect";
 import {
@@ -82,6 +82,23 @@ const MODE_QUESTION: Record<ColourMode, string> = {
 
 const MODE_ORDER: ColourMode[] = ["origin", "kind", "recency", "horizon"];
 
+/**
+ * One search result, as a node on the graph rather than a passage in a list.
+ * `score` is null for a match on the name alone.
+ */
+interface Hit {
+  id: string;
+  path: string;
+  heading: string;
+  preview: string;
+  score: number | null;
+}
+
+/** Rows in the result list. Anything past this is still lit on the graph. */
+const LIST_MAX = 6;
+/** How far the camera will zoom in on a small result, so one note does not fill the screen. */
+const FRAME_MAX_ZOOM = 1.5;
+
 /** A row of the colour key, as something the graph can be narrowed to. */
 interface MarkFilter {
   field: "origin" | "horizon" | "kind" | "foreign";
@@ -89,20 +106,16 @@ interface MarkFilter {
 }
 
 /**
- * On by default: the whole Structure group, plus the links you wrote yourself.
+ * On by default: Structure without Bridges, plus the links you wrote yourself.
  *
- * `bridges` joined the default set when the chips became groups. It was off
- * before because it had its own chip and seven edges did not earn one — but a
- * group that is permanently half-on is a worse control than one extra hairline
- * is clutter, and seven edges across two vaults is not clutter.
- *
- * `serves` joins on the same argument: it is frontmatter structure like the
- * rest of its group, and a group that is permanently half-on is a worse
- * control than one more hairline is clutter.
+ * Bridges start off. With them off the two vaults are two separate graphs,
+ * each with its own force field and its own middle — see `anchorsFor` — which
+ * is the calmer picture. Turn Bridges on and the second vault is drawn in
+ * beside the notes it crosses to.
  *
  * Sessions and Maybe stay off: both are noisy until asked for.
  */
-const DEFAULT_LAYERS: LayerId[] = ["topics", "source", "hierarchy", "serves", "bridges", "links"];
+const DEFAULT_LAYERS: LayerId[] = ["topics", "source", "hierarchy", "serves", "links"];
 
 /**
  * The one surface.
@@ -166,6 +179,24 @@ export class StrataView extends ItemView {
   private settled = false;
   /** The key row that is currently isolating part of the graph, if any. */
   private markFilter: MarkFilter | null = null;
+  /** The search, as nodes: semantic hits first, then matches on the name. */
+  private hits: Hit[] = [];
+  /** The row the arrow keys are on, or -1. */
+  private activeHit = -1;
+  /** Set once a hit has been shown with its card; the list steps aside until the box is used again. */
+  private listTucked = false;
+  /** Vaults switched off in the corner switch, by name. */
+  private hiddenVaults = new Set<string>();
+  /** Whether the positions on screen were laid out as separate fields. */
+  private fieldSplit = false;
+  private vaultEl!: HTMLElement;
+  /** Where the camera was before the search began, so clearing it goes back. */
+  private searchView: { zoom: number; pan: { x: number; y: number } } | null = null;
+  /** The lit set last framed — the camera only moves when it changes. */
+  private litSig = "";
+  private frameTimer: number | null = null;
+  /** Where a camera animation is heading, while one is running. */
+  private cameraGoal: { zoom: number; pan: { x: number; y: number } } | null = null;
   private segEl!: HTMLElement;
   private subEl!: HTMLElement;
   private colourMode: ColourMode = "origin";
@@ -237,6 +268,8 @@ export class StrataView extends ItemView {
     this.keyBodyEl = this.legendEl.createDiv({ cls: "strata-key-body" });
     this.buildModes(this.legendEl.createDiv({ cls: "strata-key-modes" }));
     this.legendEl.createDiv({ cls: "strata-key-hint", text: "click a row to show only that" });
+    // Which vaults are on screen. Bottom-right: the one corner nothing else uses.
+    this.vaultEl = stage.createDiv({ cls: "strata-vaults" });
     // The queue lives here rather than in a tab of its own — see FindingsPanel
     // for why, and why it is the better arrangement anyway.
     this.findings = new FindingsPanel(this.app, this.plugin, stage.createDiv({ cls: "strata-panel" }));
@@ -250,6 +283,7 @@ export class StrataView extends ItemView {
   async onOpen() {
     this.shell();
     const root = this.contentEl;
+    this.fieldSplit = this.plugin.data.fieldSplit ?? false;
 
     this.render();
     void this.loadSibling();
@@ -277,6 +311,8 @@ export class StrataView extends ItemView {
   async onClose() {
     this.sizeWatch?.disconnect();
     this.sizeWatch = null;
+    if (this.frameTimer) window.clearTimeout(this.frameTimer);
+    this.frameTimer = null;
     this.cy?.destroy();
     this.cy = null;
   }
@@ -465,18 +501,65 @@ export class StrataView extends ItemView {
       this.applyVisibility();
     };
     this.resultsEl = find.createDiv({ cls: "strata-results" });
-    this.searchEl.oninput = debounce(() => {
-      this.query = this.searchEl.value.trim().toLowerCase();
+    const onInput = debounce(() => {
+      const query = this.searchEl.value.trim().toLowerCase();
+      // Emptying the box by hand is a clear, the same as × or Escape — the
+      // camera goes back and nothing about the old search is left armed.
+      if (!query) {
+        this.clearQuery();
+        this.applyVisibility();
+        return;
+      }
+      // An answer belongs to the question that got it. Carrying the last
+      // query's passages into this one listed and lit them under the wrong
+      // words until the new answer landed.
+      if (query !== this.semanticFor) this.semantic = [];
+      this.query = query;
+      this.activeHit = -1;
+      this.listTucked = false;
       this.applyVisibility();
       void this.runSemantic();
     }, 160, true);
+    this.searchEl.oninput = onInput;
+    // Back in the box after showing a hit: bring the list back.
+    const untuck = () => {
+      if (!this.listTucked) return;
+      this.listTucked = false;
+      this.drawResults();
+    };
+    this.searchEl.onfocus = untuck;
+    // After Enter the caret never left the box, so focus does not fire again —
+    // a click has to bring the list back on its own.
+    this.searchEl.onmousedown = untuck;
+    // The keyboard is the fast path through a result list, and every stop on it
+    // is shown on the graph as you pass: the camera follows the selected hit.
+    // Enter commits to it, Cmd/Ctrl+Enter reads it, Escape puts everything back.
     this.searchEl.onkeydown = (e) => {
       if (e.key === "Escape") {
-        this.searchEl.value = "";
-        this.query = "";
+        e.preventDefault();
+        this.clearQuery();
         this.applyVisibility();
+        return;
       }
-      if (e.key === "Enter") this.fitToMatches();
+      // Typing is debounced, so a key pressed right after the last letter would
+      // act on the previous query's hits — and then have the late update undo
+      // it. Settle any pending input first.
+      if (e.key === "Enter" || e.key === "ArrowDown" || e.key === "ArrowUp") onInput.run();
+      const n = Math.min(this.hits.length, LIST_MAX);
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && n) {
+        e.preventDefault();
+        this.listTucked = false;
+        this.activeHit = e.key === "ArrowDown" ? (this.activeHit + 1) % n : (this.activeHit - 1 + n) % n;
+        this.drawResults();
+        this.pointAtHit(this.activeHit);
+        return;
+      }
+      if (e.key === "Enter" && n) {
+        e.preventDefault();
+        const i = Math.max(0, this.activeHit);
+        if (e.metaKey || e.ctrlKey) this.openHit(i);
+        else this.showHit(i);
+      }
     };
 
     // The Colour control used to be a <select> in here. It is the key's own
@@ -686,7 +769,7 @@ export class StrataView extends ItemView {
       }
       const nodes = live.elements().not(".strata-hidden").nodes().filter((n) => onLayer.has(n.id()));
       const placed: Placed[] = (nodes.toArray() as NodeSingular[]).map((n) => ({ id: n.id(), ...n.position() }));
-      simulate(placed, springs, this.plugin.data.forces, false, 4);
+      simulate(placed, springs, this.plugin.data.forces, false, 4, this.anchorsFor(placed.map((p) => p.id)));
       live.batch(() => {
         for (const p of placed) live.getElementById(p.id).position({ x: p.x, y: p.y });
       });
@@ -717,6 +800,143 @@ export class StrataView extends ItemView {
       if (this.tipTimer) window.clearTimeout(this.tipTimer);
       this.tipEl.removeClass("is-open");
     });
+  }
+
+  // ----------------------------------------------------------------- vaults
+
+  private localVaultName(): string {
+    return this.app.vault.getName();
+  }
+
+  /** The other vaults this one can see, by name. */
+  private foreignVaults(): string[] {
+    return [...new Set(this.foreign.nodes.map((n) => n.foreign as string).filter(Boolean))];
+  }
+
+  private vaultOfId(id: string): string {
+    if (!id.startsWith("foreign:")) return this.localVaultName();
+    const vault = this.cy?.getElementById(id).data("foreign") as string | undefined;
+    return vault || id.slice("foreign:".length).split("/")[0];
+  }
+
+  private vaultShown(node: GNode): boolean {
+    return !this.hiddenVaults.has(node.foreign || this.localVaultName());
+  }
+
+  /** Both this vault and at least one other are on screen. */
+  private vaultsSideBySide(): boolean {
+    if (this.hiddenVaults.has(this.localVaultName())) return false;
+    return this.foreignVaults().some((v) => !this.hiddenVaults.has(v));
+  }
+
+  /** Separate fields apply when the vaults are both shown and nothing ties them together. */
+  private wantSplit(): boolean {
+    return !this.activeLayers.has("bridges") && this.vaultsSideBySide();
+  }
+
+  /**
+   * A middle of its own for every other vault — a second force field.
+   *
+   * With Bridges off, nothing ties the Work vault to this one, so under one
+   * centre force it simply sank into the same middle: two unrelated graphs
+   * drawn on top of each other, which is the least readable arrangement two
+   * graphs can have. So each other vault is pulled towards its own centre,
+   * set beside this one at a distance worked out from both vaults' sizes, and
+   * this vault keeps the origin — hiding or showing Work never moves the graph
+   * you spend most of your time in.
+   *
+   * With Bridges on the answer is no fields at all: bridged entries should sit
+   * next to the notes they cross to, and a second centre would pull them away.
+   */
+  private anchorsFor(ids: string[]): Anchors | undefined {
+    if (!this.wantSplit()) return undefined;
+    const cy = this.cy;
+    if (!cy) return undefined;
+    const local = this.localVaultName();
+    // Sized from every node of each vault that is on screen, not only the ones
+    // passed in — so a slider burst and a full layout agree on where the middle is.
+    const size = new Map<string, number>();
+    cy.nodes()
+      .not(".strata-hidden")
+      .forEach((n) => {
+        const v = (n.data("foreign") as string) || local;
+        size.set(v, (size.get(v) ?? 0) + 1);
+      });
+    const others = [...size.keys()].filter((v) => v !== local);
+    if (!others.length || !size.get(local)) return undefined;
+
+    const distance = this.plugin.data.forces.distance;
+    const unit = 0.19 * distance;
+    const home = unit * Math.sqrt(size.get(local) ?? 1);
+    const centres = new Map<string, { x: number; y: number }>();
+    others.forEach((v, j) => {
+      const reach = home + unit * Math.sqrt(size.get(v) ?? 1) + 0.2 * distance;
+      const angle = (j * 2 * Math.PI) / others.length;
+      centres.set(v, { x: reach * Math.cos(angle), y: reach * Math.sin(angle) });
+    });
+    const anchors: Anchors = new Map();
+    for (const id of ids) {
+      const v = this.vaultOfId(id);
+      const centre = centres.get(v);
+      if (centre) anchors.set(id, centre);
+    }
+    return anchors.size ? anchors : undefined;
+  }
+
+  /**
+   * Re-lay the graph if what is on screen now wants the other arrangement —
+   * Bridges flipped, or a vault switched back on. Returns whether it did.
+   */
+  private refieldIfNeeded(): boolean {
+    if (!this.vaultsSideBySide() || this.wantSplit() === this.fieldSplit) return false;
+    this.runLayout(true, false);
+    return true;
+  }
+
+  /**
+   * Which vaults are on screen, as a switch in the corner.
+   *
+   * One chip per vault with its node count. Click to hide or show it; the
+   * last one standing will not switch off, because an empty canvas is never
+   * what anybody meant. Alt-click shows only that one.
+   */
+  private syncVaultSwitch() {
+    const host = this.vaultEl;
+    if (!host) return;
+    host.empty();
+    const foreign = this.foreignVaults();
+    host.toggleClass("is-open", foreign.length > 0);
+    if (!foreign.length) return;
+
+    const local = this.localVaultName();
+    const all = [local, ...foreign];
+    const count = new Map<string, number>();
+    for (const node of this.graph?.nodes ?? []) {
+      const v = node.foreign || local;
+      count.set(v, (count.get(v) ?? 0) + 1);
+    }
+    for (const vault of all) {
+      const on = !this.hiddenVaults.has(vault);
+      const chip = host.createEl("button", { cls: `strata-vault${on ? " is-on" : ""}` });
+      chip.createSpan({ cls: `strata-vault-mark${vault === local ? "" : " is-foreign"}` });
+      chip.createSpan({ cls: "strata-vault-name", text: vault });
+      chip.createSpan({ cls: "strata-vault-count", text: String(count.get(vault) ?? 0) });
+      this.explain(chip, on ? "Click to hide this vault · Alt-click to show only this one" : "Click to show this vault");
+      chip.onclick = (event) => {
+        if (event.altKey || event.metaKey || event.ctrlKey) {
+          this.hiddenVaults = new Set(all.filter((v) => v !== vault));
+        } else if (on) {
+          if (all.filter((v) => !this.hiddenVaults.has(v)).length <= 1) return;
+          this.hiddenVaults.add(vault);
+        } else {
+          this.hiddenVaults.delete(vault);
+        }
+        this.syncVaultSwitch();
+        this.applyVisibility();
+        this.drawLegend();
+        if (!this.refieldIfNeeded()) this.fitViewport();
+      };
+    }
   }
 
   // ------------------------------------------------------------ layer chips
@@ -764,6 +984,7 @@ export class StrataView extends ItemView {
       }
       this.syncLayerChips();
       this.applyVisibility();
+      this.refieldIfNeeded();
     };
     main.onmouseenter = () => this.previewLayers(group.layers);
     main.onmouseleave = () => this.clearPreview();
@@ -848,6 +1069,7 @@ export class StrataView extends ItemView {
       else this.activeLayers.add(id);
       this.syncLayerChips();
       this.applyVisibility();
+      this.refieldIfNeeded();
     };
     chip.onmouseenter = () => this.previewLayers([id]);
     chip.onmouseleave = () => this.clearPreview();
@@ -1087,7 +1309,9 @@ export class StrataView extends ItemView {
     // background re-read of a note and every file saved in another pane
     // snapped the view back to fit, and a zoomed-in reading of one corner of
     // the graph never survived more than a few seconds.
-    const view = this.fitted && this.cy ? { zoom: this.cy.zoom(), pan: { ...this.cy.pan() } } : null;
+    const view = this.cameraGoal ?? (this.fitted && this.cy ? { zoom: this.cy.zoom(), pan: { ...this.cy.pan() } } : null);
+    this.cameraGoal = null;
+    this.cy?.stop();
     this.cy?.destroy();
     this.cy = cytoscape({
       container: this.canvasEl,
@@ -1105,6 +1329,7 @@ export class StrataView extends ItemView {
     this.applyColours();
     this.applyVisibility();
     this.drawLegend();
+    this.syncVaultSwitch();
 
     this.syncIndexButton();
 
@@ -1135,6 +1360,14 @@ export class StrataView extends ItemView {
     // Otherwise a few notes are new. One relaxation pass stops them landing
     // underneath something, and leaves everything already placed where it was.
     if (seededCount) this.separate(40);
+
+    // The saved positions belong to one arrangement or the other — separate
+    // fields, or one shared middle — and which layers are on is not saved. So
+    // a session that ended with Bridges on reopens with Bridges off over
+    // positions laid out for Bridges on: the second vault sunk into the first,
+    // exactly what separate fields exist to prevent. Put that right on load,
+    // once the graph is complete enough to lay out from.
+    if (this.settled && this.refieldIfNeeded()) return;
 
     // Nothing else moves on a render.
     //
@@ -1473,6 +1706,20 @@ export class StrataView extends ItemView {
       // wins because everything joining it is the only line left with weight.
       { selector: "node.strata-faded", style: { opacity: FADE, "text-opacity": 0 } },
       { selector: "edge.strata-faded", style: { opacity: FADE_EDGE } },
+      // The search lens. Deliberately further back than the hover fade above:
+      // hovering is a glance and has to leave the graph in colour, but a search
+      // asked a question, and the answer — the hits and everything they touch —
+      // should be the only thing on screen with any weight. It is visibly tied
+      // to the query in the box, and clearing the box removes it.
+      { selector: "node.strata-away", style: { opacity: 0.14, "text-opacity": 0 } },
+      { selector: "edge.strata-away", style: { opacity: 0.03 } },
+      { selector: "node.strata-lit", style: { opacity: 1, "text-opacity": 1, "z-index": 12 } },
+      { selector: "edge.strata-lit", style: { opacity: 0.85 } },
+      { selector: "node.strata-match", style: { opacity: 1, "text-opacity": 1, "font-weight": 600, "z-index": 20 } },
+      {
+        selector: "node.strata-hit-focus",
+        style: { "border-width": 4, "border-color": v("--text-accent", "#c9784a"), "z-index": 30 },
+      },
       { selector: ".strata-hidden", style: { display: "none" } },
     ];
 
@@ -1789,6 +2036,8 @@ export class StrataView extends ItemView {
       this.semantic = [];
       this.semanticFor = "";
       this.semanticNote = "";
+      this.semanticRun++;
+      this.applyQueryHighlight();
       return this.drawResults();
     }
     if (query === this.semanticFor) return;
@@ -1818,7 +2067,15 @@ export class StrataView extends ItemView {
     this.drawResults();
   }
 
-  /** The ranked list under the box. A highlight in a graph this size is a hunt. */
+  /**
+   * The list under the box — an index to what is lit, not the answer itself.
+   *
+   * One line per hit: its name, the section that matched, and how strongly.
+   * The passage itself shows only on the row you are on, so the list stays a
+   * few lines tall instead of a wall of previews over the graph. Every row is a
+   * choice between the two things a result is for: click it to *show* it on
+   * the graph, or press Open to *read* it.
+   */
   private drawResults(): void {
     const host = this.resultsEl;
     if (!host) return;
@@ -1826,28 +2083,38 @@ export class StrataView extends ItemView {
     // Both are right-hand overlays, and the results were landing on top of the
     // Findings panel. They are also two different jobs — searching and working
     // a queue — so the one you just opened wins rather than them stacking.
-    if (this.findings.visible) return void host.removeClass("is-open");
-    if (!this.query) return void host.removeClass("is-open");
-    if (!this.semantic.length && !this.semanticNote) return void host.removeClass("is-open");
+    if (this.findings.visible || !this.query || this.listTucked) return void host.removeClass("is-open");
+    if (!this.hits.length && !this.semanticNote) return void host.removeClass("is-open");
     host.addClass("is-open");
 
     if (this.semanticNote) host.createDiv({ cls: "strata-result-note", text: this.semanticNote });
-    for (const hit of this.semantic) {
-      const row = host.createDiv({ cls: "strata-result" });
+    const at = (id: string) => this.hits.findIndex((h) => h.id === id);
+    this.hits.slice(0, LIST_MAX).forEach((hit, i) => {
+      const row = host.createDiv({ cls: `strata-result${i === this.activeHit ? " is-active" : ""}` });
       const head = row.createDiv({ cls: "strata-result-head" });
       head.createSpan({ cls: "strata-result-name", text: this.label(hit.path) });
       if (hit.heading) head.createSpan({ cls: "strata-result-heading", text: hit.heading });
-      head.createSpan({ cls: "strata-result-score", text: String(Math.round(hit.score * 100)) });
-      row.createDiv({ cls: "strata-result-preview", text: hit.preview });
-      row.onclick = () => {
-        const node = this.cy?.getElementById(hit.path);
-        if (node?.nonempty()) {
-          this.cy?.animate({ center: { eles: node }, zoom: 1.4, duration: 260 });
-          this.showCard(node as NodeSingular);
-        }
-        this.openAt(hit.path, hit.heading);
+      head.createSpan({
+        cls: "strata-result-score",
+        text: hit.score === null ? "name" : String(Math.round(hit.score * 100)),
+      });
+      const open = head.createEl("button", { cls: "strata-result-open", text: "Open" });
+      open.setAttribute("aria-label", "Open this page at the passage that matched");
+      open.onclick = (e) => {
+        e.stopPropagation();
+        this.openHit(at(hit.id));
       };
+      if (i === this.activeHit && hit.preview) row.createDiv({ cls: "strata-result-preview", text: hit.preview });
+      // Hover only rings the dot. Moving the camera under a passing mouse
+      // would make the list impossible to read down.
+      row.onmouseenter = () => this.pointAtHit(at(hit.id), false);
+      row.onmouseleave = () => this.pointAtHit(this.activeHit, false);
+      row.onclick = () => this.showHit(at(hit.id));
+    });
+    if (this.hits.length > LIST_MAX) {
+      host.createDiv({ cls: "strata-result-more", text: `${this.hits.length - LIST_MAX} more lit on the graph` });
     }
+    host.createDiv({ cls: "strata-result-hint", text: "click to show on the graph · Open to read · ↑↓ ↵ ⌘↵" });
   }
 
   private label(path: string): string {
@@ -1858,39 +2125,284 @@ export class StrataView extends ItemView {
     );
   }
 
+  /**
+   * The search, shown on the graph rather than beside it.
+   *
+   * It used to answer in a panel: eight passages with their preview text, 420px
+   * wide and up to 60% of the height, sitting over the graph it was meant to
+   * be about — while on the graph itself only the matched dots kept their
+   * colour. Their topics and sources, the things that say what a note *is*,
+   * faded with everything else, and nothing moved the camera, so a hit on the
+   * far side of the graph was a dot you had to go and find.
+   *
+   * Now the graph is the result. Each hit keeps its ring and its label, every
+   * node it touches through a visible edge lights up with its label too, and
+   * everything else steps well back — further than the hover fade, because this
+   * is a question with an answer rather than a glance. Then the camera frames
+   * the lit set, leaving room for the list, and remembers where it came from so
+   * clearing the search puts you back.
+   */
   private applyQueryHighlight() {
     const cy = this.cy;
     if (!cy) return;
     if (!this.query) {
-      cy.elements().removeClass("strata-faded");
-      cy.nodes().removeClass("strata-match");
+      cy.batch(() => {
+        cy.elements().removeClass("strata-away strata-lit");
+        cy.nodes().removeClass("strata-match strata-hit-focus");
+      });
+      this.hits = [];
       this.searchEl?.removeClass("is-no-match");
       this.clearEl?.removeClass("is-on");
       return;
     }
-    // `-` and `_` are separators in a filename and spaces in a name. Matching
-    // across both means "jane smith" finds the source page *and* the notes
-    // called note-some-long-article, which is what typing a person's name is
-    // asking for.
-    const needle = this.query.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
-    const semantic = new Set(this.semantic.map((h) => h.path));
-    const matches = cy
-      .nodes()
-      .filter((n) => semantic.has(n.id()) || (n.data("search") as string).includes(needle));
+
+    // The pick is a note, not a row number. A new answer reorders the list —
+    // semantic hits land in front of name matches, a filter drops some — and
+    // an index kept across that pointed the lens at a different note from the
+    // one whose card was open.
+    const pickedId = this.activeHit >= 0 ? this.hits[this.activeHit]?.id : undefined;
+    this.hits = this.collectHits();
+    const answer = this.hits.map((h) => h.id).join("|");
+    if (answer !== this.litSig) {
+      this.activeHit = pickedId ? this.hits.findIndex((h) => h.id === pickedId) : -1;
+      if (this.activeHit < 0) this.listTucked = false;
+    }
+    const hitNodes = cy.collection();
+    for (const hit of this.hits) hitNodes.merge(cy.getElementById(hit.id));
+    // Browsing, every hit's neighbourhood is lit. Once one is picked — arrowed
+    // to, or shown — only *its* neighbourhood is: the other results stay on
+    // screen as ringed dots so you can see where they are, but their own
+    // connections step back. Otherwise a well-linked second result throws its
+    // fan of lines straight across the note you actually chose.
+    const picked = this.activeHit >= 0 ? this.hits[this.activeHit] : null;
+    const lit = picked
+      ? this.neighbourhoodOf(cy.getElementById(picked.id) as unknown as cytoscape.CollectionReturnValue).union(hitNodes)
+      : this.neighbourhoodOf(hitNodes);
+
     cy.batch(() => {
-      cy.nodes().removeClass("strata-match");
-      if (matches.empty()) {
-        cy.elements().removeClass("strata-faded");
-        return;
-      }
-      matches.addClass("strata-match");
-      cy.elements().addClass("strata-faded");
-      matches.union(matches.connectedEdges()).removeClass("strata-faded");
+      cy.elements().removeClass("strata-away strata-lit");
+      cy.nodes().removeClass("strata-match strata-hit-focus");
+      if (hitNodes.empty()) return;
+      hitNodes.addClass("strata-match");
+      lit.addClass("strata-lit");
+      cy.elements().difference(lit).addClass("strata-away");
     });
+    if (this.activeHit >= 0 && this.hits[this.activeHit]) {
+      cy.getElementById(this.hits[this.activeHit].id).addClass("strata-hit-focus");
+    }
     // The box itself carries the "nothing" answer, so the graph does not have
     // to say it by going blank.
-    this.searchEl?.toggleClass("is-no-match", matches.empty());
+    this.searchEl?.toggleClass("is-no-match", hitNodes.empty());
     this.clearEl?.toggleClass("is-on", true);
+
+    // Move the camera only when the answer changes, and not on every keystroke
+    // of the question: a short wait lets typing finish and the model answer.
+    if (answer === this.litSig) return;
+    this.litSig = answer;
+    // The rows are drawn from `hits`; a different answer means different rows.
+    this.drawResults();
+    if (this.frameTimer) window.clearTimeout(this.frameTimer);
+    if (hitNodes.empty()) return;
+    this.frameTimer = window.setTimeout(() => {
+      this.frameTimer = null;
+      if (!this.cy || this.activeHit >= 0) return;
+      // Name matches arrive first and the model's answer a moment later.
+      // Framing the first and then the second is two camera moves for one
+      // question, so while the model is still out, wait for it.
+      if (this.query.length >= 3 && this.semanticFor !== this.query && this.plugin.index?.size) return;
+      this.frameEles(this.neighbourhoodOf(this.hitCollection()));
+    }, 380);
+  }
+
+  /**
+   * A path from the index, as the node that stands for it on the graph.
+   *
+   * The other vault's pages are indexed by their plain path, `Work/Entries/x.md`,
+   * but they sit on the graph as `foreign:Work/Entries/x.md` — so every Work
+   * result used to match nothing, light nothing, and do nothing when clicked.
+   */
+  private nodeFor(path: string): NodeSingular | null {
+    const cy = this.cy;
+    if (!cy) return null;
+    for (const id of [path, `foreign:${path}`]) {
+      const node = cy.getElementById(id);
+      if (node.nonempty() && !node.hasClass("strata-hidden")) return node as NodeSingular;
+    }
+    return null;
+  }
+
+  /** Semantic hits first, best passage per note; then notes whose name matches. */
+  private collectHits(): Hit[] {
+    const cy = this.cy;
+    if (!cy) return [];
+    const out: Hit[] = [];
+    const seen = new Set<string>();
+    for (const passage of this.semantic) {
+      const node = this.nodeFor(passage.path);
+      if (!node || seen.has(node.id())) continue;
+      seen.add(node.id());
+      out.push({ id: node.id(), path: passage.path, heading: passage.heading, preview: passage.preview, score: passage.score });
+    }
+    // A name match is only worth anything past a couple of letters — two
+    // characters light up half the vault and tell you nothing.
+    const needle = this.query.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+    if (needle.length >= 2) {
+      const byName = cy
+        .nodes()
+        .filter((n) => !seen.has(n.id()) && !n.hasClass("strata-hidden"))
+        .filter((n) => ((n.data("label") as string) ?? "").toLowerCase().replace(/[-_]+/g, " ").includes(needle))
+        .sort((a, b) => (b.data("degree") as number) - (a.data("degree") as number));
+      byName.forEach((n) => {
+        out.push({ id: n.id(), path: n.id(), heading: "", preview: "", score: null });
+      });
+    }
+    return out;
+  }
+
+  private hitCollection(): cytoscape.CollectionReturnValue {
+    const cy = this.cy as Core;
+    const nodes = cy.collection();
+    for (const hit of this.hits) nodes.merge(cy.getElementById(hit.id));
+    return nodes;
+  }
+
+  /** The nodes given, everything they touch through a visible edge, and those edges. */
+  private neighbourhoodOf(nodes: cytoscape.CollectionReturnValue): cytoscape.CollectionReturnValue {
+    const edges = nodes.connectedEdges().filter((e) => !e.hasClass("strata-hidden"));
+    return nodes.union(edges).union(edges.connectedNodes());
+  }
+
+  /**
+   * Put these elements in view, beside whatever panel is open rather than
+   * under it.
+   *
+   * Not cytoscape's own `fit`, which centres on the whole canvas: the result
+   * list and the card both sit on the right, so a centred frame put half of
+   * the answer behind them. This solves the zoom and pan for the canvas minus
+   * that strip, and caps the zoom so a single hit does not fill the screen.
+   */
+  private frameEles(eles: cytoscape.CollectionReturnValue) {
+    const cy = this.cy;
+    if (!cy || eles.empty()) return;
+    if (!this.searchView) this.searchView = { zoom: cy.zoom(), pan: { ...cy.pan() } };
+    // Measured, not assumed. The result list hangs under the Find box, which
+    // sits left of the toolbar buttons rather than against the canvas edge, so
+    // a flat "list width from the right" framed the answer straight under it.
+    // Whatever is open on the right — list, card or Findings — the frame keeps
+    // clear of everything from its left edge to the canvas edge.
+    const canvas = this.canvasEl.getBoundingClientRect();
+    const covers = (el: HTMLElement | null | undefined, open: boolean) =>
+      el && open ? Math.max(0, canvas.right - el.getBoundingClientRect().left + 24) : 0;
+    const panel = this.contentEl.querySelector<HTMLElement>(".strata-panel");
+    const reserve = Math.min(
+      canvas.width * 0.6,
+      Math.max(
+        covers(this.resultsEl, !!this.resultsEl?.hasClass("is-open")),
+        covers(this.cardEl, this.cardEl?.hasClass("is-open") ?? false),
+        covers(panel, this.findings.visible)
+      )
+    );
+    const pad = 70;
+    const bb = eles.boundingBox({});
+    const w = Math.max(cy.width() - reserve - 2 * pad, 160);
+    const h = Math.max(cy.height() - 2 * pad, 160);
+    const bw = Math.max(bb.w, 1);
+    const bh = Math.max(bb.h, 1);
+    const zoom = Math.max(cy.minZoom(), Math.min(FRAME_MAX_ZOOM, w / bw, h / bh));
+    const pan = { x: pad + (w - bw * zoom) / 2 - bb.x1 * zoom, y: pad + (h - bh * zoom) / 2 - bb.y1 * zoom };
+    this.animateCamera({ zoom, pan }, 340);
+  }
+
+  /** Back to where the camera was before the search began. */
+  private restoreView() {
+    const view = this.searchView;
+    this.searchView = null;
+    if (!view || !this.cy) return;
+    this.animateCamera(view, 300);
+  }
+
+  /**
+   * Move the camera, and remember where it is going until it gets there.
+   *
+   * A render rebuilds cytoscape from scratch and carries the viewport across —
+   * and while the background indexer runs, a render follows every note it
+   * reads. One landing mid-flight copied the half-way viewport, stopped the
+   * camera there, and since nothing had changed about the answer nothing ever
+   * finished the move. With the goal remembered, a render lands on it instead.
+   */
+  private animateCamera(goal: { zoom: number; pan: { x: number; y: number } }, duration: number) {
+    const cy = this.cy;
+    if (!cy) return;
+    this.cameraGoal = goal;
+    cy.stop();
+    cy.animate(
+      { zoom: goal.zoom, pan: goal.pan },
+      {
+        duration,
+        easing: "ease-out-cubic",
+        complete: () => {
+          this.cameraGoal = null;
+          this.applyLabelPolicy();
+        },
+      }
+    );
+  }
+
+  /** Arrow keys and hover: ring this hit and put its neighbourhood in view. */
+  private pointAtHit(i: number, move = true) {
+    const cy = this.cy;
+    if (!cy) return;
+    if (move) {
+      // A real selection: narrow the lens to it, then go there.
+      this.applyQueryHighlight();
+      const hit = this.hits[i];
+      if (hit) this.frameEles(this.neighbourhoodOf(cy.getElementById(hit.id) as unknown as cytoscape.CollectionReturnValue));
+      return;
+    }
+    // A passing mouse only says which dot this row is — no relighting, no
+    // camera — or reading down the list would make the graph flicker under it.
+    cy.nodes().removeClass("strata-hit-focus");
+    const hit = this.hits[i];
+    if (hit) cy.getElementById(hit.id).addClass("strata-hit-focus");
+  }
+
+  /**
+   * Show on graph: the committed choice. The list steps aside so it does not
+   * sit over the card, the hit is pinned and inspected, and the camera frames
+   * it with everything it touches. The search stays live — the other hits are
+   * still lit, and going back to the box brings the list back.
+   */
+  private showHit(i: number) {
+    const cy = this.cy;
+    const hit = this.hits[i];
+    if (!cy || !hit) return;
+    this.activeHit = i;
+    this.listTucked = true;
+    this.drawResults();
+    const node = cy.getElementById(hit.id) as NodeSingular;
+    this.pinned = hit.id;
+    this.showCard(node);
+    this.pointAtHit(i);
+  }
+
+  /** Open page: read it, at the passage that matched. */
+  private openHit(i: number) {
+    const hit = this.hits[i];
+    if (!hit) return;
+    // A Work page opens in its own vault and a session resumes in its own app;
+    // both of those live on the card, so Open shows the card for them.
+    if (hit.id.startsWith("foreign:") || hit.id.startsWith("session:")) {
+      const node = this.cy?.getElementById(hit.id);
+      if (!node?.nonempty()) return;
+      // Pinned like a right-click, so shift-click links from the card that is
+      // actually on screen rather than from whatever was pinned before.
+      this.pinned = hit.id;
+      this.listTucked = true;
+      this.drawResults();
+      this.showCard(node as NodeSingular);
+      return;
+    }
+    this.openAt(hit.id, hit.heading);
   }
 
   /** One way to drop the query, so the box, Escape and the × cannot disagree. */
@@ -1900,16 +2412,15 @@ export class StrataView extends ItemView {
     this.semanticFor = "";
     this.semanticNote = "";
     this.semanticRun++;
+    this.activeHit = -1;
+    this.listTucked = false;
+    this.litSig = "";
+    if (this.frameTimer) window.clearTimeout(this.frameTimer);
+    this.frameTimer = null;
     if (this.searchEl) this.searchEl.value = "";
     this.applyQueryHighlight();
     this.drawResults();
-  }
-
-  private fitToMatches() {
-    const cy = this.cy;
-    if (!cy || !this.query) return;
-    const matches = cy.nodes(".strata-match").filter((n) => !n.hasClass("strata-hidden"));
-    if (matches.nonempty()) cy.animate({ fit: { eles: matches, padding: 120 }, duration: 320 });
+    this.restoreView();
   }
 
   private applyColours(mode: ColourMode = this.colourMode) {
@@ -1968,6 +2479,20 @@ export class StrataView extends ItemView {
             !this.horizonFilter ||
             (this.horizonFilter === "unset" ? !h && node.data("kind") === "note" : h === this.horizonFilter);
           node.toggleClass("strata-hidden", !(kindOk && horizonOk));
+        });
+        cy.edges().forEach((edge) => {
+          if (edge.source().hasClass("strata-hidden") || edge.target().hasClass("strata-hidden")) {
+            edge.addClass("strata-hidden");
+          }
+        });
+      }
+
+      // A vault switched off in the corner takes its nodes with it, and every
+      // edge that reached them — bridges included.
+      if (this.hiddenVaults.size) {
+        const local = this.localVaultName();
+        cy.nodes().forEach((node) => {
+          if (this.hiddenVaults.has((node.data("foreign") as string) || local)) node.addClass("strata-hidden");
         });
         cy.edges().forEach((edge) => {
           if (edge.source().hasClass("strata-hidden") || edge.target().hasClass("strata-hidden")) {
@@ -2121,7 +2646,7 @@ export class StrataView extends ItemView {
       const key = mode as "origin" | "kind" | "horizon";
       const tally = new Map<string, number>();
       for (const node of this.graph?.nodes ?? []) {
-        if (node.foreign) continue;
+        if (node.foreign || !this.vaultShown(node)) continue;
         if (mode !== "kind" && node.kind !== "note") continue;
         const value = (node as unknown as Record<string, string | undefined>)[key] ?? "";
         tally.set(value, (tally.get(value) ?? 0) + 1);
@@ -2157,6 +2682,7 @@ export class StrataView extends ItemView {
     const tally = new Map<string, number>();
     let foreign = 0;
     for (const node of this.graph?.nodes ?? []) {
+      if (!this.vaultShown(node)) continue;
       if (node.foreign) foreign++;
       else if (node.kind !== "note") tally.set(node.kind, (tally.get(node.kind) ?? 0) + 1);
     }
@@ -2301,8 +2827,20 @@ export class StrataView extends ItemView {
 
     // A layer with a single edge has nothing to simulate; the ring still needs
     // somewhere to be, so park runs either way.
-    if (core.length >= 2) simulate(core, springs, this.plugin.data.forces, fresh);
-    park(parked, core);
+    const anchors = this.anchorsFor([...core, ...parked].map((p) => p.id));
+    if (core.length >= 2) simulate(core, springs, this.plugin.data.forces, fresh, undefined, anchors);
+    // Each field parks its own loose nodes around its own middle.
+    const fieldOf = (id: string) => (anchors?.has(id) ? this.vaultOfId(id) : "");
+    for (const field of new Set([...core, ...parked].map((p) => fieldOf(p.id)))) {
+      const centre = [...(anchors?.entries() ?? [])].find(([id]) => fieldOf(id) === field)?.[1] ?? { x: 0, y: 0 };
+      park(
+        parked.filter((p) => fieldOf(p.id) === field),
+        core.filter((p) => fieldOf(p.id) === field),
+        centre
+      );
+    }
+    this.fieldSplit = !!anchors;
+    this.plugin.data.fieldSplit = this.fieldSplit;
 
     const settled = new Map([...core, ...parked].map((p) => [p.id, { x: p.x, y: p.y }]));
     const layout = cy.layout({
@@ -2512,7 +3050,7 @@ export class StrataView extends ItemView {
     if (hidden) {
       this.cardEl.createDiv({
         cls: "strata-card-sub",
-        text: `${hidden} more in layer${hidden === 1 ? "" : "s"} that are switched off`,
+        text: hidden === 1 ? "1 more in a layer that is switched off" : `${hidden} more in layers that are switched off`,
       });
     }
 

@@ -31,6 +31,8 @@ interface StrataData {
    * removes it. Bumping this throws them away once.
    */
   layoutVersion: number;
+  /** Whether the saved positions were laid out as separate fields, one per vault. */
+  fieldSplit?: boolean;
   /**
    * The four force sliders, plus the one that decides how far out the
    * unattached sit. Named after the forces themselves rather than an abstract
@@ -81,7 +83,7 @@ const DEFAULT_DATA: StrataData = {
   positions: {},
   linkedSessions: {},
   semantic: DEFAULT_SEMANTIC,
-  layoutVersion: 11,
+  layoutVersion: 12,
   forces: DEFAULT_FORCES,
   writer: "qwen3:8b",
   dismissed: [],

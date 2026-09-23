@@ -182,7 +182,20 @@ const BURST_ALPHA = 0.12;
  * graph gives the same answer. Otherwise the current arrangement is the starting
  * point and this relaxes it rather than rolling a new one.
  */
-export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettings, fresh: boolean, ticks?: number): void {
+/**
+ * A centre other than the origin, per node — how two vaults get two force
+ * fields. Nodes not in the map are pulled to the origin as before.
+ */
+export type Anchors = Map<string, { x: number; y: number }>;
+
+export function simulate(
+  nodes: Placed[],
+  springs: Spring[],
+  forces: ForceSettings,
+  fresh: boolean,
+  ticks?: number,
+  anchors?: Anchors
+): void {
   const n = nodes.length;
   if (n < 2) return;
   // `ticks` runs a short burst at a constant, gentle alpha instead of a full
@@ -200,13 +213,28 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
   const vx = new Float64Array(n);
   const vy = new Float64Array(n);
 
+  // Where each node's centre force pulls: the origin, or its own field's middle.
+  const ax = new Float64Array(n);
+  const ay = new Float64Array(n);
+  if (anchors) {
+    for (let i = 0; i < n; i++) {
+      const a = anchors.get(nodes[i].id);
+      if (a) {
+        ax[i] = a.x;
+        ay[i] = a.y;
+      }
+    }
+  }
+
   const GOLDEN = Math.PI * (3 - Math.sqrt(5));
   for (let i = 0; i < n; i++) {
     if (fresh) {
+      // Start each node at its own field's middle, so a second vault does not
+      // have to fight its way out of the first one before it can settle.
       const r = 10 * Math.sqrt(0.5 + i);
       const a = i * GOLDEN;
-      x[i] = r * Math.cos(a);
-      y[i] = r * Math.sin(a);
+      x[i] = ax[i] + r * Math.cos(a);
+      y[i] = ay[i] + r * Math.sin(a);
     } else {
       x[i] = nodes[i].x;
       y[i] = nodes[i].y;
@@ -330,8 +358,8 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
 
     for (let i = 0; i < n; i++) {
       const g = pull[i] * alpha;
-      vx[i] -= x[i] * g;
-      vy[i] -= y[i] * g;
+      vx[i] -= (x[i] - ax[i]) * g;
+      vy[i] -= (y[i] - ay[i]) * g;
     }
 
     for (let i = 0; i < n; i++) {
@@ -369,11 +397,14 @@ export function simulate(nodes: Placed[], springs: Spring[], forces: ForceSettin
  * one pass, touching nothing. Still there, still clickable, still countable —
  * just no longer voting on where the visible graph goes.
  */
-export function park(parked: Placed[], core: Placed[]): void {
+export function park(parked: Placed[], core: Placed[], centre = { x: 0, y: 0 }): void {
   if (!parked.length) return;
 
+  // Around the field's own middle: with two vaults side by side, a ring around
+  // the origin would have to clear both, and the second vault's loose nodes
+  // would end up a long way from the vault they belong to.
   let radius = 0;
-  for (const p of core) radius = Math.max(radius, Math.hypot(p.x, p.y));
+  for (const p of core) radius = Math.max(radius, Math.hypot(p.x - centre.x, p.y - centre.y));
   // A clear gap, so the ring reads as "outside" rather than as a fuzzy edge of
   // the core. Floors for the case where the visible layer is a single edge.
   const inner = Math.max(radius * 1.35, radius + 160, 240);
@@ -386,7 +417,7 @@ export function park(parked: Placed[], core: Placed[]): void {
   for (let i = 0; i < parked.length; i++) {
     const r = inner + spread * Math.sqrt(i / parked.length);
     const a = i * GOLDEN;
-    parked[i].x = Math.cos(a) * r;
-    parked[i].y = Math.sin(a) * r;
+    parked[i].x = centre.x + Math.cos(a) * r;
+    parked[i].y = centre.y + Math.sin(a) * r;
   }
 }

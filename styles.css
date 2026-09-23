@@ -1628,26 +1628,79 @@
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  width: 420px;
-  max-height: 60vh;
-  overflow-y: auto;
+  width: 300px;
   z-index: 40;
-  padding: 6px;
-  border: 1px solid var(--background-modifier-border);
+  padding: 5px;
+  border: 1px solid var(--strata-hairline);
   border-radius: 10px;
-  background: var(--background-primary);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  background: color-mix(in srgb, var(--background-primary) 90%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
 }
 .strata-results.is-open { display: block; }
-.strata-result-note { padding: 8px 9px; font-size: 12px; color: var(--text-muted); }
-.strata-result { padding: 8px 9px; border-radius: 7px; cursor: pointer; }
-.strata-result:hover { background: var(--background-modifier-hover); }
-.strata-result-head { display: flex; align-items: baseline; gap: 7px; }
-.strata-result-name { font-size: 13px; color: var(--text-normal); }
-.strata-result-heading { font-size: 11px; color: var(--text-accent); }
-.strata-result-score { margin-left: auto; font-size: 11px; color: var(--text-faint); }
+.strata-result-note { padding: 6px 8px; font-size: 11.5px; color: var(--text-muted); }
+
+/* One line per hit. The list is an index to what is lit on the graph, not the
+   answer itself, so it stays a few lines tall. */
+.strata-result { padding: 5px 8px; border-radius: 7px; cursor: pointer; }
+.strata-result:hover,
+.strata-result.is-active { background: color-mix(in srgb, var(--text-normal) 7%, transparent); }
+.strata-result-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.strata-result-name {
+  font-size: 12.5px;
+  color: var(--text-normal);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strata-result-heading {
+  font-size: 10.5px;
+  color: var(--text-accent);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strata-result-score {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+/* The second choice on every row: read it rather than show it. Present on the
+   row you are on or pointing at, out of the way on the rest. */
+.strata-results .strata-result-open {
+  flex: 0 0 auto;
+  display: none;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-family: inherit;
+  line-height: 1.4;
+  border: 1px solid var(--strata-hairline);
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.strata-result:hover .strata-result-open,
+.strata-result.is-active .strata-result-open { display: block; }
+.strata-results .strata-result-open:hover {
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--text-normal) 8%, transparent);
+}
+.strata-result.is-active .strata-result-score,
+.strata-result:hover .strata-result-score { margin-left: auto; }
+
+/* Only the row you are on shows what matched. */
 .strata-result-preview {
-  margin-top: 3px;
+  margin-top: 4px;
   font-size: 11px;
   line-height: 1.45;
   color: var(--text-muted);
@@ -1656,6 +1709,13 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.strata-result-more,
+.strata-result-hint {
+  padding: 5px 8px 3px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.strata-result-hint { border-top: 1px solid var(--strata-hairline); margin-top: 3px; }
 
 /* Overview: grouped by what a number actually is — a queue, a choice, or weather. */
 .strata-over-group {
@@ -1734,4 +1794,79 @@
 
 .theme-dark .strata-key-modes .strata-key-mode.is-on {
   background: color-mix(in srgb, var(--text-normal) 16%, transparent);
+}
+
+/* ------------------------------------------------------------ vault switch */
+
+/* Which vaults are on screen. Bottom-right, the one corner nothing else uses;
+   painted like the key's mode tabs so it reads as the same kind of control. */
+.strata-vaults {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  z-index: 30;
+  display: none;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  border: 1px solid var(--strata-hairline);
+  background: color-mix(in srgb, var(--background-primary) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.strata-vaults.is-open { display: flex; }
+
+.strata-vaults .strata-vault {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.strata-vaults .strata-vault:hover {
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--text-normal) 6%, transparent);
+}
+
+.strata-vaults .strata-vault.is-on {
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--text-normal) 9%, transparent);
+}
+
+.theme-dark .strata-vaults .strata-vault.is-on {
+  background: color-mix(in srgb, var(--text-normal) 16%, transparent);
+}
+
+/* The mark is the shape each vault's nodes take on the canvas: filled here,
+   a dashed outline for a vault read from next door. */
+.strata-vault-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.7;
+}
+
+.strata-vault-mark.is-foreign {
+  background: none;
+  border: 1.5px dashed currentColor;
+}
+
+.strata-vault:not(.is-on) .strata-vault-mark { opacity: 0.3; }
+
+.strata-vault-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
 }
