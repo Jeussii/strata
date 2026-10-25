@@ -102,12 +102,12 @@ export async function siblingDocs(app: App): Promise<Doc[]> {
         }
         if (!entry.name.endsWith(".md")) continue;
         const rel = path.relative(root, full).split(path.sep).join("/");
-        // Containers and paperwork, not thinking. Projects and courses are
-        // status and dates; Admin and the vault map are the schema describing
-        // the store rather than anything held in it. Same reasoning that keeps
-        // Topics and Sources out — a spec that matches every query about the
-        // vault crowds out the notes actually being asked for.
-        if (rel.startsWith("Projects/") || rel.startsWith("Courses/")) continue;
+        // Paperwork, not thinking: Admin is checklists and the vault map is the
+        // schema describing the store rather than anything held in it — a spec
+        // that matches every query about the vault crowds out the pages being
+        // asked for. Projects and courses used to be skipped as well, as status
+        // and dates; but each carries the one paragraph saying what the thing
+        // *is*, and "what was marine agents again" deserves an answer.
         if (rel.startsWith("Admin/") || rel === "VAULT-MAP.md") continue;
         let stat: import("node:fs").Stats;
         try {

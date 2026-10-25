@@ -1,4 +1,5 @@
 import { App, TFile } from "obsidian";
+import { ARCHIVE } from "./places";
 
 /**
  * The only two ways anything in Strata changes a note.
@@ -107,7 +108,7 @@ export async function bridgeTo(app: App, fromPath: string, ref: string): Promise
  * "Merge" under a vault whose first law is *append, never rewrite* cannot mean
  * "delete the loser". So it does not: the absorbed note's body is appended to
  * the keeper under a dated `## Added` entry that names where it came from, and
- * the absorbed file itself moves into `Vault/Full/` — the folder that already
+ * the absorbed file itself moves into `Vault/Archive/` — the folder that already
  * exists for text that is kept but is not a node. The keeper points at it with
  * `full:`, and Obsidian repoints every inbound link on the way. Nothing is
  * deleted at any point.
@@ -135,16 +136,16 @@ export async function mergeInto(app: App, keepPath: string, absorbPath: string):
   //
   // Obsidian repoints links on a rename, which is the wrong answer here: the
   // basename does not change, so every referrer quietly followed the note into
-  // `Full/` — and an archive is not a node, so those edges vanished from the
+  // `Archive/` — and an archive is not a node, so those edges vanished from the
   // graph while still looking fine in the editor. The content moved to the
   // keeper, so the links belong on the keeper. Wiring is an index, not a claim,
   // which is the one thing the vault's laws allow to be corrected.
   const repointed = await repoint(app, absorb, keep);
 
-  if (!app.vault.getAbstractFileByPath("Full")) await app.vault.createFolder("Full");
-  let archive = `Full/${name}.md`;
+  if (!app.vault.getAbstractFileByPath(ARCHIVE)) await app.vault.createFolder(ARCHIVE);
+  let archive = `${ARCHIVE}/${name}.md`;
   let n = 2;
-  while (app.vault.getAbstractFileByPath(archive)) archive = `Full/${name}-${n++}.md`;
+  while (app.vault.getAbstractFileByPath(archive)) archive = `${ARCHIVE}/${name}-${n++}.md`;
   await app.fileManager.renameFile(absorb, archive);
 
   const moved = app.vault.getAbstractFileByPath(archive);

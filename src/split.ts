@@ -2,6 +2,7 @@ import { App, Modal, Notice, TFile, normalizePath } from "obsidian";
 import { Segment, bodyOf, segment } from "./segment";
 import { Proposal, propose } from "./distil";
 import { Original, composeAtom, slugify, today, uniqueName } from "./atom";
+import { LIBRARY } from "./places";
 
 /**
  * Turning one note that is secretly several notes into several notes.
@@ -22,7 +23,7 @@ import { Original, composeAtom, slugify, today, uniqueName } from "./atom";
  *   field is editable and every passage can be dropped or merged into its
  *   neighbour. The split is one explicit action on one note at a time.
  *
- *   **The original survives whole.** It moves to `Vault/Full/`, which is not a
+ *   **The original survives whole.** It moves to `Vault/Library/`, which is not a
  *   node and is never embedded, and every atom points back at it with `full:`.
  *   Nothing is deleted, so the original is always recoverable.
  */
@@ -232,7 +233,7 @@ export class SplitModal extends Modal {
 
     const lines = [
       `${groups.length} atom${groups.length === 1 ? "" : "s"}` + (dropped ? `, ${dropped} dropped` : ""),
-      `the original moves to Vault/Full/ and every atom points back at it`,
+      `the original moves to Vault/Library/ and every atom points back at it`,
     ];
     if (inbound) {
       lines.push(`${inbound} note${inbound === 1 ? "" : "s"} link here — those links will follow it into the archive`);
@@ -304,10 +305,10 @@ export class SplitModal extends Modal {
       // fails outright. Moving first frees the name, makes every `full:` link
       // resolve immediately, and leaves the whole original safe in the archive
       // if anything downstream throws.
-      if (!this.app.vault.getAbstractFileByPath("Full")) {
-        await this.app.vault.createFolder("Full");
+      if (!this.app.vault.getAbstractFileByPath(LIBRARY)) {
+        await this.app.vault.createFolder(LIBRARY);
       }
-      const archivePath = normalizePath(`Full/${archiveName}.md`);
+      const archivePath = normalizePath(`${LIBRARY}/${archiveName}.md`);
       await this.app.fileManager.renameFile(this.file, archivePath);
 
       // An archive is not a node: it keeps its provenance and loses its wiring.
@@ -338,7 +339,7 @@ export class SplitModal extends Modal {
         created.push(base);
       }
 
-      new Notice(`Split into ${created.length} atoms. The original is in Vault/Full/.`);
+      new Notice(`Split into ${created.length} atoms. The original is in Vault/Library/.`);
       this.onDone();
       this.close();
     } catch (err) {

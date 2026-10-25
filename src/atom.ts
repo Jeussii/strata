@@ -63,7 +63,7 @@ export interface AtomSpec {
   /** verbatim passage text, already joined if several were merged */
   body: string;
   original: Original;
-  /** basename of the `Full/` original this came out of */
+  /** basename of the `Library/` original this came out of */
   archive: string;
 }
 

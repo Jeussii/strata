@@ -1,5 +1,6 @@
 import { App, TFile, normalizePath } from "obsidian";
 import type { SemanticIndex, SemanticSettings } from "./semantic";
+import { filed } from "./places";
 
 /**
  * The Inbox: written, not yet filed.
@@ -149,7 +150,9 @@ async function suggest(
   text: string,
   settings: SemanticSettings
 ): Promise<{ topic: string; score: number }[]> {
-  const near = await index.nearest(text, settings, NEIGHBOURS);
+  // Only filed notes can vote: a Library original or another Inbox page has
+  // no topics, so it would take a neighbour's slot and cast nothing.
+  const near = await index.nearest(text, settings, NEIGHBOURS, filed);
   const votes = new Map<string, number>();
   for (const hit of near) {
     const file = app.vault.getAbstractFileByPath(hit.path);

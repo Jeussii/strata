@@ -68,15 +68,57 @@ can say the same thing under different topics. **Resonance** finds passages that
 rhyme across notes sharing no topic, the cross-domain link set arithmetic can
 never reach.
 
+Two dated entries are never proposed to each other: journals resemble each other
+because days do, and a moment beside the principle it tested is the link worth
+having. Lines that recur across many pages — the printed prompts of a journal
+template, a placeholder under every blank question — are stripped before a page
+is embedded (`boilerplate.json`), so sharing a template is not mistaken for
+sharing an idea.
+
+### Statistics propose, a model decides
+
+No threshold can tell a real connection from a coincidence of register, so the
+Maybe layer is judged. `mcp/judge.py candidates` lists every pair the layers
+propose; something that can read — an assistant session, or a local model with
+`judge.py auto` — answers `duplicate`, `link` (with a one-sentence reason) or
+`no`, and `judge.py apply` writes `judgements.json`. The plugin honours it: `no`
+hides the pair, `duplicate` draws it as Echo, `link` keeps it with the reason on
+its card. A verdict is pinned to the content of both pages and expires when
+either changes. On the author's vault the first pass read 346 pairs and kept 77.
+
 A local model then reads the relation between a pair — tension, agreement,
 elaboration, application — and the verdict is presented as a *reading* rather
 than a fact, with the model's own reason attached so you can check it against
 the passages shown beside it.
 
+## Search leaves nothing out
+
+The graph and search ask different questions, so they see different things.
+Three folders are searched but never drawn:
+
+| Folder | Holds | Why not in the graph |
+| --- | --- | --- |
+| `Library/` | anything taken in whole — the original a set of notes was split from, an article, a transcript, a recording | an original sits near every note taken out of it and would become a hub |
+| `Archive/` | anything replaced — a superseded plan, a pre-rewrite copy | it is history; search ranks it below everything current |
+| `Inbox/` | written, not yet filed | it has no topics yet |
+
+Search reads meaning and words at once. The words count only when a passage
+holds most of the query's *distinctive* vocabulary — a name, a title, a rare
+term — because scaled any other way, the common words of a question outvote the
+right page in another language. Measured on 34 searches with known answers, a
+third of them crossing languages:
+
+| | found in top 5 |
+| --- | --- |
+| English-first model, meaning only | 18 |
+| multilingual model (bge-m3), meaning only | 29 |
+| multilingual model, meaning + gated words | 31 |
+
 ## It runs locally
 
 Embeddings and relation reading both go through [Ollama](https://ollama.com) on
-your own machine — `nomic-embed-text` for the index. **No API keys, and nothing
+your own machine — `bge-m3` for the index, multilingual, so an English question
+reaches a page written in German. **No API keys, and nothing
 leaves the device.** The vaults this is built for are private; that is the whole
 reason for the constraint, and it shapes what the semantic layer can be.
 
@@ -106,6 +148,7 @@ only the Links, Sessions and Maybe layers will have anything in them.
 | `up` | topics | the parent topic |
 | `for` | work entries | list of wikilinks — the project or course this serves |
 | `bridges` | either | plain `Vault/path.md` strings that cross to a second vault |
+| `full` | notes | wikilink to the `Library/` original the note was split from |
 
 ## An assistant can query it too
 
@@ -115,7 +158,7 @@ Obsidian running — the plugin writes the index, the server only ever reads it.
 
 | Tool | What it answers |
 | --- | --- |
-| `search` | natural language, not keywords — returns passages with heading, origin and topics |
+| `search` | a question, a name or a title — meaning and words at once; returns passages with heading, origin, topics and which half found them |
 | `neighbours` | what a page connects to, on every layer at once |
 | `get` | one page, or one section by heading |
 | `status` | what the index holds, and whether it is behind the vault on disk |
@@ -162,11 +205,12 @@ To build straight into a real vault instead, put that plugin folder's path in
 a `.strata-out` file at the repo root (gitignored), or set `STRATA_OUT`.
 
 The semantic layers need [Ollama](https://ollama.com) running locally with
-`nomic-embed-text` pulled. Everything else works without it.
+`bge-m3` pulled (`ollama pull bge-m3`). Everything else works without it. An
+index built with an earlier model is rebuilt once, automatically.
 
 ## Status
 
-v0.1.0. Desktop only. Built against one vault's schema and generalised outward
+v0.2.0. Desktop only. Built against one vault's schema and generalised outward
 from there, so expect the Structure layers to want configuring before they fit
 yours.
 

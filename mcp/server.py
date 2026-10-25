@@ -25,10 +25,10 @@ Design notes worth keeping:
   - **It reports the index's age.** With Obsidian closed the index is as fresh
     as the last time the plugin ran, and stale results served silently are
     worse than stale results served honestly.
-  - **Query vectors are embedded exactly as the documents were**, `clustering:`
-    prefix included. nomic-embed-text puts different prefixes in different
-    regions of the space; matching the document prefix matters more here than
-    using the notionally-correct `search_query:` one.
+  - **Query vectors are embedded exactly as the documents were**, with the
+    model's own prefix from `indexer.PROFILES` (nomic wants `clustering:`,
+    bge-m3 wants none). Matching the document side matters more than using a
+    notionally-correct query prefix.
   - **No dependencies.** stdlib only, so there is no venv to rot and nothing to
     reinstall in a year.
 """
@@ -72,9 +72,8 @@ INDEX_PATH = os.path.join(VAULT, ".obsidian", "plugins", "strata", "semantic-ind
 DATA_PATH = os.path.join(VAULT, ".obsidian", "plugins", "strata", "data.json")
 OLLAMA = os.environ.get("STRATA_OLLAMA", "http://127.0.0.1:11434")
 
-# Matches how Strata embeds a passage. Changing either of these without
-# rebuilding the index puts queries in a different space than the documents.
-EMBED_PREFIX = "clustering: "
+# Matches how Strata embeds a passage; the model's own prefix comes from
+# indexer.PROFILES, so a query lands in the same space as the documents.
 SEG_CHARS = 1800
 
 # Token discipline. The loop runs several times per question, so a call that
@@ -104,6 +103,7 @@ class Index:
         self.meta = {}           # path -> frontmatter-ish facts
         self.edges = []          # (a, b, layer)
         self.adj = {}            # path -> list of (other, layer)
+        self.words = None        # Lexical, the keyword half of search
 
     # -- loading ---------------------------------------------------------
 
@@ -137,6 +137,7 @@ class Index:
                 self.headings.append(seg.get("h") or "")
                 self.previews.append(seg.get("p") or "")
         self._read_structure()
+        self.words = None    # rebuilt on the next search, from the same pages
 
     # -- vault structure -------------------------------------------------
 
@@ -177,13 +178,16 @@ class Index:
                             "bridges": as_list(front.get("bridges")),
                             "up": strip_link(front.get("up") or ""),
                             "for": [strip_link(x) for x in as_list(front.get("for"))],
+                            "full": strip_link(front.get("full") or ""),
                             "path": full,
                             "body": body,
                         }
                         by_name.setdefault(name[:-3], key)
 
         scan(VAULT, "", [("Notes", "note"), ("Topics", "topic"), ("Sources", "source"),
-                         ("Essays", "note"), ("Goals", "note"), ("Reference", "note")])
+                         ("Essays", "note"), ("Goals", "note"), ("Reference", "note"),
+                         ("Research", "note"), ("Library", "full"), ("Archive", "archive"),
+                         ("Inbox", "inbox")])
         scan(WORK, "Work/", [("Entries", "entry"), ("Projects", "project"),
                              ("Courses", "course"), ("People", "person")])
 
@@ -196,7 +200,7 @@ class Index:
             self.meta[key] = {
                 "kind": "session", "title": session.get("title") or sid[:8],
                 "topics": topics, "source": "", "origin": "", "horizon": "",
-                "captured": "", "bridges": [], "up": "", "for": [],
+                "captured": "", "bridges": [], "up": "", "for": [], "full": "",
                 "path": session.get("file", ""), "body": None,
                 # What it wrote is an edge worth following: these are the notes
                 # this conversation actually produced.
@@ -397,8 +401,10 @@ def cosine(a, b):
 
 
 def embed(text):
-    body = json.dumps({"model": INDEX.model or "nomic-embed-text",
-                       "input": [EMBED_PREFIX + text[:SEG_CHARS]]}).encode()
+    import indexer
+    model = INDEX.model or indexer.settings()[1]
+    body = json.dumps({"model": model,
+                       "input": [indexer.profile(model)["prefix"] + text[:SEG_CHARS]]}).encode()
     req = urllib.request.Request(f"{OLLAMA}/api/embed", data=body,
                                  headers={"Content-Type": "application/json"})
     try:
@@ -473,6 +479,135 @@ def connects_summary(path):
     return ", ".join(f"{n} {layer}" for layer, n in sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
+class Lexical:
+    """
+    The words half of search: BM25 over the same passages the vectors come from.
+
+    Meaning alone could not find a page by its own name. An article's title
+    embeds near everything loosely on its subject, so the article called that ranked
+    nowhere — while a name, a course code or a phrase remembered word for word
+    is exactly what gets asked. Mirrors `lexical.ts` in the plugin; the two do
+    not have to agree to the digit, only in spirit, because nothing is stored.
+
+    Built from the raw pages rather than the template-stripped text the vectors
+    see: a recurring answer like "Leg day" is noise for similarity and exactly
+    what a keyword search is for.
+    """
+
+    K1, B = 1.2, 0.75
+    PREFIX_FANOUT = 20
+
+    def __init__(self, docs):
+        import indexer
+        self.passages = []      # (path, heading, length)
+        self.postings = {}
+        total = 0
+        for doc in docs:
+            title = tokens(doc["title"])
+            for seg in indexer.segment(doc["text"]):
+                words = title + tokens(seg["heading"]) + tokens(seg["text"])
+                if not words:
+                    continue
+                at = len(self.passages)
+                self.passages.append((doc["key"], seg["heading"], len(words)))
+                total += len(words)
+                tf = {}
+                for w in words:
+                    tf[w] = tf.get(w, 0) + 1
+                for w, n in tf.items():
+                    self.postings.setdefault(w, []).append((at, n))
+        self.avg = total / len(self.passages) if self.passages else 1.0
+
+    def idf(self, term):
+        n = len(self.postings.get(term, ()))
+        return math.log(1 + (len(self.passages) - n + 0.5) / (n + 0.5)) if n else 0.0
+
+    def search(self, query, limit=60):
+        """Best passage per page as (path, heading, coverage), most coverage first.
+
+        Coverage is the share of the query's distinctive vocabulary a passage
+        holds — the idf of each query word it contains over the idf of all of
+        them — so a passage matching only "the" and "day" of a long question
+        scores near zero however often it says them. See `lexical.ts`.
+        """
+        words = list(dict.fromkeys(tokens(query)))
+        if not words or not self.passages:
+            return []
+        accepts = [{w: 1.0} for w in words]
+        last = words[-1]
+        if len(last) >= 3:
+            n = 0
+            for term in self.postings:
+                if term != last and term.startswith(last):
+                    accepts[-1][term] = 0.6
+                    n += 1
+                    if n >= self.PREFIX_FANOUT:
+                        break
+        worth = [max(self.idf(t) for t in terms) for terms in accepts]
+        total = sum(worth) or 1.0
+        scores, held = {}, {}
+        for i, terms in enumerate(accepts):
+            credited = set()
+            for term, weight in terms.items():
+                hits = self.postings.get(term)
+                if not hits:
+                    continue
+                idf = self.idf(term)
+                for at, tf in hits:
+                    length = self.passages[at][2]
+                    scores[at] = scores.get(at, 0.0) + weight * idf * tf * (self.K1 + 1) / (
+                        tf + self.K1 * (1 - self.B + self.B * length / self.avg))
+                    if at not in credited:
+                        credited.add(at)
+                        held[at] = held.get(at, 0.0) + weight * worth[i]
+        best = {}
+        for at, score in scores.items():
+            path, heading, _len = self.passages[at]
+            cov = min(1.0, held.get(at, 0.0) / total)
+            if path not in best or (cov, score) > best[path][:2]:
+                best[path] = (cov, score, heading)
+        ranked = sorted(((c, s, p, h) for p, (c, s, h) in best.items()), reverse=True)
+        return [(p, h, c) for c, _s, p, h in ranked[:limit]]
+
+
+def tokens(text):
+    return [t for t in re.findall(r"[^\W_]+", (text or "").lower()) if len(t) > 1]
+
+
+def lexical():
+    """The keyword index for the pages the vectors cover, built once per index load."""
+    if INDEX.words is None:
+        import indexer
+        INDEX.words = Lexical(indexer.all_docs(session_markdown))
+    return INDEX.words
+
+
+# What an Archive page's score is multiplied by: findable, never ahead of its replacement.
+ARCHIVE_WEIGHT = 0.5
+# Share of the score that comes from words, and how much of the query's
+# distinctive vocabulary a passage must hold before its words count at all.
+WORDS_WEIGHT, WORDS_GATE = 0.4, 0.6
+
+
+def blend(cos, coverage, model):
+    """One score from both halves. Mirrors `search` in semantic.ts.
+
+    Measured on 34 searches with known answers (2026-10-25). Reciprocal-rank
+    fusion lost the article whose title *was* the query, because the meaning
+    half always offers sixty pages and any page both halves mention at middling
+    rank beat it. Blending BM25 scaled to the best hit lost the other way: in an
+    English question about a German journal, the common words matched dozens of
+    English journals and outvoted the answer. What holds is meaning read
+    absolutely, and words counted only when a passage holds most of the query's
+    distinctive vocabulary — a name, a title, a rare term: 31 of 34.
+    """
+    import indexer
+    p = indexer.profile(model)
+    m = 0.0 if cos is None else max(0.0, min(1.0, (cos - p["meaning_floor"]) / p["meaning_span"]))
+    w = max(0.0, (coverage - WORDS_GATE) / (1 - WORDS_GATE))
+    return (1 - WORDS_WEIGHT) * m + WORDS_WEIGHT * w
+
+
 # --------------------------------------------------------------------- tools
 
 
@@ -494,42 +629,85 @@ def tool_search(query, limit=DEFAULT_HITS, kind=None):
         scored.append((cosine(vector, candidate), i))
     scored.sort(reverse=True)
 
-    # Best passage per note, then re-rank. Similarity finds the most similar
-    # passage; the loop wants the most useful page, so a little node degree goes
-    # into the ordering — a hub beats a passing mention as an entry point.
-    #
-    # Deliberately *not* biased by origin. An earlier version nudged
-    # my-thought/my-summary above ai-summary. But everything in a curated vault
-    # is there because someone put it there, so provenance is a label to
-    # report, not a reason to rank.
+    # Best passage per page — the meaning ranking.
     best = {}
     for score, i in scored:
         path = idx.paths[i]
         if path not in best:
             best[path] = (score, i)
-    ranked = []
-    for path, (score, i) in best.items():
-        meta = idx.meta.get(path, {})
-        bonus = 0.02 * min(1.0, idx.degree(path) / 12.0)
-        ranked.append((score + bonus, score, i, path))
-    ranked.sort(reverse=True)
+    meaning = sorted(best.items(), key=lambda kv: -kv[1][0])[:60]
 
+    # And the words ranking, over the same pages, blended by strength.
+    words = [w for w in lexical().search(query)
+             if (not kind or idx.meta.get(w[0], {}).get("kind") == kind) and w[2] > WORDS_GATE]
+    import indexer
+    floor = indexer.profile(idx.model)["meaning_floor"]
+
+    fused = {}
+    for path, (score, i) in meaning:
+        fused[path] = {"score": score, "coverage": 0.0, "heading": idx.headings[i],
+                       "preview": idx.previews[i], "by": ["meaning"] if score >= floor else []}
+    for rank, (path, heading, coverage) in enumerate(words):
+        row = fused.get(path)
+        if row is None:
+            row = fused[path] = {"score": None, "coverage": 0.0, "heading": heading,
+                                 "preview": "", "by": []}
+        row["coverage"] = coverage
+        row["by"].append("words")
+        # When the words rank a page near the top, theirs is the passage that
+        # actually contains the query, so show that one.
+        if rank < 3:
+            row["heading"] = heading
+    for row in fused.values():
+        row["blend"] = blend(row["score"], row["coverage"], idx.model)
+
+    # Deliberately *not* biased by origin. Everything in a curated vault is
+    # there because someone put it there, so provenance is a label to report,
+    # not a reason to rank. A little node degree still breaks near-ties: a hub
+    # beats a passing mention as an entry point.
+    # A replaced page stays findable but never ranks ahead of what replaced it.
+    def rank_key(item):
+        path, row = item
+        weight = ARCHIVE_WEIGHT if path.startswith("Archive/") else 1.0
+        return row["blend"] * weight * (1 + 0.05 * min(1.0, idx.degree(path) / 12.0))
+    ranked = [p for p, _r in sorted(fused.items(), key=rank_key, reverse=True)]
+
+    # An original in the Library says what its atoms say, at length. When an
+    # atom drawn from it is already an answer, the original is a duplicate
+    # result; when none is, it is the only way in, and it says which atoms exist.
+    by_title = {m["title"]: p for p, m in idx.meta.items() if m.get("kind") in ("full", "archive")}
+    atoms_of = {}
+    for path, meta in idx.meta.items():
+        original = by_title.get(meta.get("full") or "")
+        if original:
+            atoms_of.setdefault(original, []).append(path)
     hits = []
-    for _adj, score, i, path in ranked[: max(1, min(limit, MAX_HITS))]:
+    shown = set()
+    for path in ranked:
+        if len(hits) >= max(1, min(limit, MAX_HITS)):
+            break
+        if any(a in shown for a in atoms_of.get(path, ())):
+            continue
+        row = fused[path]
         meta = idx.meta.get(path, {})
-        heading = idx.headings[i]
-        hits.append({
+        heading = row["heading"]
+        hit = {
             "path": path,
             "title": label(path),
             "heading": heading,
-            "score": round(score, 3),
+            "score": round(row["score"], 3) if row["score"] is not None else None,
+            "matched_by": row["by"],
             "kind": meta.get("kind", "note"),
             "origin": meta.get("origin", ""),
             "topics": meta.get("topics", []),
             "open": f"{path}#{heading}" if heading else path,
             "connects": connects_summary(path),
-            "passage": passage_text(path, heading, idx.previews[i]),
-        })
+            "passage": passage_text(path, heading, row["preview"]),
+        }
+        if atoms_of.get(path):
+            hit["atoms_drawn_from_it"] = [label(a) for a in atoms_of[path]]
+        hits.append(hit)
+        shown.add(path)
     return {"note": idx.age_note(), "hits": hits}
 
 
@@ -562,10 +740,12 @@ def tool_neighbours(path, semantic=True):
             if best > scores.get(other, 0):
                 scores[other] = best
         near = sorted(scores.items(), key=lambda kv: -kv[1])[:MAX_NEIGHBOURS_PER_LAYER]
+        import indexer
+        rhyme_floor = indexer.semantic_settings()["floor"]
         linked = {n["path"] for group in groups.values() for n in group}
         rhymes = [{"path": p, "title": label(p), "similarity": round(s, 3),
                    "already_linked": p in linked}
-                  for p, s in near if s >= 0.74]
+                  for p, s in near if s >= rhyme_floor]
         if rhymes:
             groups["rhymes with (semantic)"] = rhymes
 
@@ -734,10 +914,22 @@ def tool_status():
     # Indexed but no longer on disk — the one failure mode a ledger must catch.
     missing = [p for p in idx.by_path if p not in idx.meta and not os.path.exists(os.path.join(VAULT, p))]
 
+    # Proposed links nobody has judged yet, counted by the snapshot job.
+    pending = None
+    try:
+        with open(os.path.join(os.path.dirname(INDEX_PATH), "pending-pairs.json"), encoding="utf-8") as fh:
+            pending = len(json.load(fh))
+    except (OSError, ValueError):
+        pass
+
     return {
         "note": idx.age_note(),
         "model": idx.model,
         "totals": {"pages": len(idx.by_path), "passages": len(idx.paths)},
+        "links_awaiting_judgement": (
+            f"{pending} — run a judging pass (judge.py) when asked, or monthly" if pending else pending
+        ),
+        "deliberately_not_searched": "Topics/ and Sources/ (their bodies are Dataview queries), Work/Admin/ (checklists)",
         "by_store": {
             k: {"pages": v["pages"], "passages": v["passages"],
                 "newest": time.strftime("%Y-%m-%d", time.localtime(v["newest"])) if v["newest"] else ""}
@@ -764,18 +956,21 @@ TOOLS = [
     {
         "name": "search",
         "description": (
-            "Semantic search across the vault — notes and Work entries. Returns the "
-            "passages that match, with the heading they sit under, what each page connects to, "
-            "and a path#heading you can pass to `get`. Use this FIRST for any question about "
-            "what the user thinks, believes, has written or has decided; it is far cheaper "
-            "than reading files and returns their own words rather than a summary."
+            "Search across both vaults by meaning AND by words at once — notes, Work entries, "
+            "linked sessions, the Library (originals, articles, podcast and video transcripts, "
+            "brainstorms), the Inbox, and the Archive of replaced versions (always ranked last). Names, titles and exact phrases work as well as questions. Returns the "
+            "passages that match, with the heading they sit under, which half found each "
+            "(`matched_by`), what each page connects to, and a path#heading you can pass to "
+            "`get`. Use this FIRST for any question about what the user thinks, believes, has "
+            "written or has decided; it is far cheaper than reading files and returns their own "
+            "words rather than a summary."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What you are looking for, in natural language."},
                 "limit": {"type": "integer", "description": f"How many pages to return (default {DEFAULT_HITS}, max {MAX_HITS})."},
-                "kind": {"type": "string", "description": "Optional filter: note, topic, source, entry, project."},
+                "kind": {"type": "string", "description": "Optional filter: note, full (Library), archive, inbox, topic, source, entry, project, session."},
             },
             "required": ["query"],
         },

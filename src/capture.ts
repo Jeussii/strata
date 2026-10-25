@@ -2,6 +2,7 @@ import { App, Modal, Notice, TFile, debounce, normalizePath } from "obsidian";
 import { Passage, SemanticIndex, SemanticSettings } from "./semantic";
 import { shape, slugify } from "./atom";
 import { appendTo, today } from "./write";
+import { filed } from "./places";
 
 /**
  * Capture, with the duplicate check in front of it.
@@ -101,7 +102,7 @@ export class CaptureModal extends Modal {
     if (this.checking) return;
     this.checking = true;
     try {
-      this.hits = await this.index.nearest(this.text, this.settings, 4);
+      this.hits = await this.index.nearest(this.text, this.settings, 4, filed);
       this.renderHits();
     } catch (err) {
       console.error("[strata] duplicate check failed", err);

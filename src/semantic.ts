@@ -2,7 +2,9 @@ import { App, normalizePath } from "obsidian";
 import type { Doc } from "./docs";
 import { GEdge, Graph } from "./model";
 import { cosine, embed } from "./ollama";
-import { Segment, segment } from "./segment";
+import { Segment, segment, stripBoilerplate } from "./segment";
+import type { LexicalIndex } from "./lexical";
+import { archived } from "./places";
 
 /**
  * The semantic index.
@@ -45,6 +47,12 @@ const CACHE_VERSION = 2;
 const ECHO_COVERAGE = 0.5;
 const SEG_CHARS = 1800;
 const PREVIEW = 240;
+/** Share of a passage's search score that comes from its words. */
+const WORDS_WEIGHT = 0.4;
+/** Below this share of the query's distinctive vocabulary, the words say nothing. */
+const WORDS_GATE = 0.6;
+/** What an Archive page's score is multiplied by: kept findable, never ahead of its replacement. */
+const ARCHIVE_WEIGHT = 0.5;
 export const BATCH = 8;
 
 export interface SemanticSettings {
@@ -62,10 +70,14 @@ export interface SemanticSettings {
 
 export const DEFAULT_SEMANTIC: SemanticSettings = {
   host: "http://localhost:11434",
-  model: "nomic-embed-text",
+  model: "bge-m3",
   k: 4,
-  echoAt: 0.88,
-  floor: 0.74,
+  // Under bge-m3. The floor is nomic's 0.74 moved to the same percentile of
+  // every note pair in this vault (the 80th); "said twice" is set to what a
+  // genuinely near-identical passage scores, not mapped, because nomic's
+  // 0.86 was the over-loose cut that filled Echo with journals.
+  echoAt: 0.85,
+  floor: 0.59,
   background: true,
 };
 
@@ -89,7 +101,15 @@ interface Entry {
 interface CacheFile {
   version: number;
   model: string;
+  /** Which template list the vectors were cut with — see `boilerplate`. */
+  boilerRev?: number;
   entries: Record<string, Entry>;
+}
+
+/** Written by the MCP server's indexer, which sees the whole vault at once. */
+interface BoilerplateFile {
+  rev: number;
+  lines: string[];
 }
 
 export interface Passage {
@@ -126,14 +146,40 @@ function hash(text: string): number {
 }
 
 /**
- * `clustering:` is nomic-embed-text's own prefix for symmetric comparison.
- * `search_document` would tilt the space toward query matching, which is not
- * the question being asked. The note title rides along so a passage keeps some
- * of its context when the paragraph alone is ambiguous.
+ * What a model needs to be told, and what its numbers mean.
+ *
+ * nomic-embed-text wants a task prefix — `clustering:` for symmetric
+ * comparison — and bge-m3 wants none. And a cosine is not a unit: the same
+ * pair of notes scores 0.74 under one and 0.59 under the other. So the cutoffs
+ * that turn a score into a decision live with the model, not in the code
+ * around it. Mirrors `PROFILES` in the MCP server's indexer.
+ *
+ * **bge-m3 since 2026-10-25, and the switch was measured.** On 34 searches with
+ * known answers — a third of them an English question about a page written in
+ * German or Swedish, because that is how this vault is written — nomic found
+ * 18 by meaning and bge-m3 found 29. nomic is English-first: the German
+ * and Swedish pages sat in a corner of its space that an English
+ * question never reached.
  */
-function forEmbedding(title: string, seg: Segment): string {
+interface Profile {
+  prefix: string;
+  /** search: below this a query and a passage only share a language */
+  meaningFloor: number;
+  /** search: this far above the floor is as strong as a match gets */
+  meaningSpan: number;
+}
+const PROFILES: Record<string, Profile> = {
+  "nomic-embed-text": { prefix: "clustering: ", meaningFloor: 0.55, meaningSpan: 0.3 },
+  "bge-m3": { prefix: "", meaningFloor: 0.4, meaningSpan: 0.3 },
+};
+export function profile(model: string): Profile {
+  return PROFILES[model.replace(/:latest$/, "")] ?? { prefix: "", meaningFloor: 0.4, meaningSpan: 0.3 };
+}
+
+/** The note title rides along so a passage keeps some context when the paragraph alone is ambiguous. */
+function forEmbedding(title: string, seg: Segment, model: string): string {
   const head = seg.heading ? `${title} — ${seg.heading}` : title;
-  return `clustering: ${head}. ${seg.text}`.slice(0, SEG_CHARS);
+  return `${profile(model).prefix}${head}. ${seg.text}`.slice(0, SEG_CHARS);
 }
 
 // ----------------------------------------------------------------- base64
@@ -163,6 +209,10 @@ export class SemanticIndex {
   private entries = new Map<string, Entry>();
   private vecs = new Map<string, Float32Array[]>();
   private model = "";
+  /** The template list the stored vectors were cut with. */
+  private boilerRev = 0;
+  /** The one in force now, re-read at every sweep. */
+  private boiler: { rev: number; lines: Set<string> } = { rev: 0, lines: new Set() };
 
   /** Bumped on every mutation, so the edge cache knows when it is stale. */
   private revision = 0;
@@ -223,6 +273,7 @@ export class SemanticIndex {
         return;
       }
       this.model = raw.model;
+      this.boilerRev = raw.boilerRev ?? 0;
       for (const [path, entry] of Object.entries(raw.entries ?? {})) {
         this.entries.set(path, entry);
         this.vecs.set(
@@ -240,6 +291,7 @@ export class SemanticIndex {
     const file: CacheFile = {
       version: CACHE_VERSION,
       model: this.model,
+      boilerRev: this.boilerRev,
       entries: Object.fromEntries(this.entries),
     };
     await this.app.vault.adapter.write(this.path, JSON.stringify(file));
@@ -264,6 +316,10 @@ export class SemanticIndex {
    */
   async stale(docs: Doc[], settings: SemanticSettings): Promise<Doc[]> {
     if (this.model && this.model !== settings.model) return docs.slice();
+    await this.readBoilerplate();
+    // A new template list changes what a page embeds as without changing the
+    // file, so the free mtime check cannot be trusted until every hash is redone.
+    const every = this.boilerRev !== this.boiler.rev;
     const out: Doc[] = [];
     for (const doc of docs) {
       const entry = this.entries.get(doc.key);
@@ -271,12 +327,36 @@ export class SemanticIndex {
         out.push(doc);
         continue;
       }
-      if (entry.m === doc.mtime) continue;
+      if (!every && entry.m === doc.mtime) continue;
       const raw = await doc.read();
-      if (hash(raw) !== entry.c) out.push(doc);
-      else entry.m = doc.mtime; // touched, not changed
+      if (hash(stripBoilerplate(raw, this.boiler.lines)) !== entry.c) {
+        out.push(doc);
+        // Forgotten, so a page still queued when the revision below is
+        // recorded is found again by the next sweep rather than trusted.
+        entry.m = -1;
+      } else entry.m = doc.mtime; // touched, not changed
     }
+    this.boilerRev = this.boiler.rev;
     return out;
+  }
+
+  /**
+   * The template list, as the MCP server's indexer last computed it.
+   *
+   * Computed there and only applied here, because deciding which lines are
+   * template needs every page at once and the two indexers must agree exactly:
+   * if each worked it out for itself, a vault one page past the threshold would
+   * have two answers and every journal would ping-pong between them.
+   */
+  private async readBoilerplate(): Promise<void> {
+    const path = normalizePath(`${this.dir}/boilerplate.json`);
+    try {
+      if (!(await this.app.vault.adapter.exists(path))) return;
+      const raw = JSON.parse(await this.app.vault.adapter.read(path)) as BoilerplateFile;
+      if (raw.rev !== this.boiler.rev) this.boiler = { rev: raw.rev, lines: new Set(raw.lines ?? []) };
+    } catch (err) {
+      console.error("[strata] could not read the template list", err);
+    }
   }
 
   /** Drop vectors for notes that no longer exist, so a deleted note stops matching. */
@@ -307,7 +387,7 @@ export class SemanticIndex {
     }
     this.model = settings.model;
 
-    const raw = await doc.read();
+    const raw = stripBoilerplate(await doc.read(), this.boiler.lines);
     const segs = segment(raw);
     if (!segs.length) {
       // A stub is all title and no thought. Recorded as empty so it is not
@@ -322,7 +402,7 @@ export class SemanticIndex {
     const vectors: Float32Array[] = [];
     for (let i = 0; i < segs.length; i += BATCH) {
       const slice = segs.slice(i, i + BATCH);
-      vectors.push(...(await embed(settings.host, settings.model, slice.map((s) => forEmbedding(title, s)))));
+      vectors.push(...(await embed(settings.host, settings.model, slice.map((s) => forEmbedding(title, s, settings.model)))));
     }
 
     this.entries.set(doc.key, {
@@ -345,10 +425,16 @@ export class SemanticIndex {
    * similar to that one" but "have I already said this". One embedding call,
    * then a scan — the index is already in memory.
    */
-  async nearest(text: string, settings: SemanticSettings, limit = 5): Promise<Passage[]> {
-    const [query] = await embed(settings.host, settings.model, [`clustering: ${text}`.slice(0, SEG_CHARS)]);
+  async nearest(
+    text: string,
+    settings: SemanticSettings,
+    limit = 5,
+    only?: (path: string) => boolean
+  ): Promise<Passage[]> {
+    const [query] = await embed(settings.host, settings.model, [`${profile(settings.model).prefix}${text}`.slice(0, SEG_CHARS)]);
     const hits: Passage[] = [];
     for (const [path, segs] of this.vecs) {
+      if (only && !only(path)) continue;
       const meta = this.entries.get(path)?.segs ?? [];
       let best = -1;
       let at = 0;
@@ -364,6 +450,71 @@ export class SemanticIndex {
     }
     hits.sort((a, b) => b.score - a.score);
     return hits.slice(0, limit);
+  }
+
+  /**
+   * The search box's answer: meaning and words, ranked as one list.
+   *
+   * Meaning alone could not find a page by its own name. An embedding of
+   * an article's own title sits near everything vaguely on its subject, and
+   * the article itself ranked nowhere, while a name, a course code or a
+   * phrase remembered word for word is exactly what a person types. So the
+   * same query runs twice — against the vectors, and against the words of
+   * every passage — and the two are blended by strength.
+   *
+   * By strength, not by rank. Reciprocal-rank fusion was tried first and lost
+   * exactly that case: the meaning half always offers sixty pages, so a page
+   * both halves mention at middling rank beat the article whose title *was*
+   * the query, which only the words found. Meaning is read absolutely — a
+   * cosine of 0.6 is weak wherever it ranks — and words relatively, because
+   * BM25 has no absolute scale. Mirrors `blend` in the MCP server.
+   */
+  async search(text: string, settings: SemanticSettings, lexical: LexicalIndex | null, limit = 10): Promise<Passage[]> {
+    let meaning: Passage[] = [];
+    let failed: unknown = null;
+    try {
+      meaning = await this.nearest(text, settings, 60);
+    } catch (err) {
+      failed = err;
+    }
+    const words = lexical?.search(text, 60) ?? [];
+    // Without the model, words still answer; without either, say so.
+    if (failed && !words.length) throw failed;
+
+    // Meaning is read absolutely — a cosine near the floor is weak wherever it
+    // ranks. Words count only when a passage holds most of the query's
+    // *distinctive* vocabulary (`coverage`, weighted by rarity): a name, a
+    // title, a rare term. Scaled from BM25 instead, an English question's
+    // common words — "day", "parents", "grateful" — matched dozens of English
+    // journals and outvoted the German page that was the answer (21/34 found
+    // against 31/34 this way).
+    const { meaningFloor, meaningSpan } = profile(settings.model);
+    const rows = new Map<string, { m: number; w: number; best: Passage }>();
+    for (const p of meaning) {
+      const m = Math.max(0, Math.min(1, (p.score - meaningFloor) / meaningSpan));
+      rows.set(p.path, { m, w: 0, best: p });
+    }
+    words.forEach((hit, rank) => {
+      const w = Math.max(0, (hit.coverage - WORDS_GATE) / (1 - WORDS_GATE));
+      const row = rows.get(hit.path);
+      if (row) {
+        row.w = w;
+        // Near the top of the words ranking, theirs is the passage that
+        // actually contains the query, so that is the one to show.
+        if (rank < 3 && w > 0) row.best = { ...row.best, heading: hit.heading, preview: hit.preview };
+      } else if (w > 0) {
+        rows.set(hit.path, { m: 0, w, best: { path: hit.path, heading: hit.heading, preview: hit.preview, score: -1 } });
+      }
+    });
+    // Replaced pages are findable, never in front of what replaced them.
+    const weight = (r: { m: number; w: number; best: Passage }) =>
+      ((1 - WORDS_WEIGHT) * r.m + WORDS_WEIGHT * r.w) * (archived(r.best.path) ? ARCHIVE_WEIGHT : 1);
+    return [...rows.values()]
+      // Neither close in meaning nor containing the words: noise, however it would rank.
+      .filter((r) => r.m > 0 || r.w > 0)
+      .sort((a, b) => weight(b) - weight(a))
+      .slice(0, limit)
+      .map((r) => r.best);
   }
 
   /** The passage pair behind an edge, so a card can show its working. */
@@ -513,6 +664,13 @@ export class SemanticIndex {
 
     const explained = new Set<string>();
     const pair = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+    // Two moments are not linked by sounding alike. A journal entry beside a
+    // principle is the link worth having — the evidence it was earned — but two
+    // entries resemble each other because days do: "today was a good day" in
+    // October and in March. Measured 2026-10-25, 191 of the 217 Echo pairs were
+    // exactly that. A real duplicate between them still surfaces: the judge
+    // finds those by their words, not their meaning.
+    const situational = new Set(graph.nodes.filter((n) => n.horizon === "situational").map((n) => n.id));
     for (const edge of graph.edges) {
       if (edge.layer === "links" || edge.layer === "suggested") explained.add(pair(edge.source, edge.target));
     }
@@ -539,7 +697,11 @@ export class SemanticIndex {
     for (let i = 0; i < n; i++) {
       const row: { j: number; s: number }[] = [];
       for (let j = 0; j < n; j++) {
-        if (i !== j && sim[i][j] >= settings.floor) row.push({ j, s: sim[i][j] });
+        if (i === j || sim[i][j] < settings.floor) continue;
+        // Excluded here, before the top-k is taken, not after: otherwise the
+        // other journals fill every slot and no journal can ever claim a note.
+        if (situational.has(ids[i]) && situational.has(ids[j])) continue;
+        row.push({ j, s: sim[i][j] });
       }
       row.sort((a, b) => b.s - a.s);
       near.push(row.slice(0, k));

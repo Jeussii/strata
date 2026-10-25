@@ -1,7 +1,7 @@
 {
   "id": "strata",
   "name": "Strata",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.5.0",
   "description": "A layered graph workspace. The graph is the place you work, and every edge knows what kind of edge it is.",
   "author": "Justus Reichel",

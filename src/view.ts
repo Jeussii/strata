@@ -40,6 +40,7 @@ import {
   isDark,
   tune,
 } from "./theme";
+import { archived } from "./places";
 
 
 export const VIEW_TYPE_STRATA = "strata-graph";
@@ -1209,16 +1210,15 @@ export class StrataView extends ItemView {
     }
     this.graph.nodes.push(...derived.nodes);
     this.graph.edges.push(...derived.edges);
-    this.graph.edges.push(...suggestLinks(this.graph));
+    this.graph.edges.push(...suggestLinks(this.graph).filter((e) => !this.plugin.isDismissed(e.source, e.target)));
 
     // The model's half. Folded in after the schema's, and only ever additive:
     // resonance skips any pair the frontmatter already explains, so the two
     // halves never draw the same relation twice.
     if (this.plugin.index?.size) {
+      const drawn = new Set(this.graph.nodes.map((n) => n.id));
       this.graph.edges.push(
-        ...this.plugin.index
-          .edges(this.graph, this.plugin.data.semantic)
-          .filter((e) => !this.plugin.isDismissed(e.source, e.target))
+        ...this.plugin.judged(this.plugin.index.edges(this.graph, this.plugin.data.semantic), drawn)
       );
     }
 
@@ -2053,9 +2053,9 @@ export class StrataView extends ItemView {
     this.semanticNote = "Thinking…";
     this.drawResults();
     try {
-      const hits = await index.nearest(query, this.plugin.data.semantic, 8);
+      const hits = await index.search(query, this.plugin.data.semantic, await this.plugin.words(), 10);
       if (run !== this.semanticRun || query !== this.query) return;
-      this.semantic = hits.filter((h) => h.score >= 0.6);
+      this.semantic = hits;
       this.semanticFor = query;
       this.semanticNote = this.semantic.length ? "" : "Nothing in the vault is about that.";
     } catch {
@@ -2094,9 +2094,11 @@ export class StrataView extends ItemView {
       const head = row.createDiv({ cls: "strata-result-head" });
       head.createSpan({ cls: "strata-result-name", text: this.label(hit.path) });
       if (hit.heading) head.createSpan({ cls: "strata-result-heading", text: hit.heading });
+      if (archived(hit.path)) head.createSpan({ cls: "strata-result-heading", text: "archived" });
       head.createSpan({
         cls: "strata-result-score",
-        text: hit.score === null ? "name" : String(Math.round(hit.score * 100)),
+        // -1 is a page the words found and the meaning did not.
+        text: hit.score === null ? "name" : hit.score < 0 ? "words" : String(Math.round(hit.score * 100)),
       });
       const open = head.createEl("button", { cls: "strata-result-open", text: "Open" });
       open.setAttribute("aria-label", "Open this page at the passage that matched");
@@ -2192,7 +2194,7 @@ export class StrataView extends ItemView {
     }
     // The box itself carries the "nothing" answer, so the graph does not have
     // to say it by going blank.
-    this.searchEl?.toggleClass("is-no-match", hitNodes.empty());
+    this.searchEl?.toggleClass("is-no-match", !this.hits.length);
     this.clearEl?.toggleClass("is-on", true);
 
     // Move the camera only when the answer changes, and not on every keystroke
@@ -2238,10 +2240,12 @@ export class StrataView extends ItemView {
     const out: Hit[] = [];
     const seen = new Set<string>();
     for (const passage of this.semantic) {
-      const node = this.nodeFor(passage.path);
-      if (!node || seen.has(node.id())) continue;
-      seen.add(node.id());
-      out.push({ id: node.id(), path: passage.path, heading: passage.heading, preview: passage.preview, score: passage.score });
+      // A page with no dot — something in the Library, or one a filter has hidden —
+      // is still an answer. It is listed and opens; it just lights nothing.
+      const id = this.nodeFor(passage.path)?.id() ?? passage.path;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, path: passage.path, heading: passage.heading, preview: passage.preview, score: passage.score });
     }
     // A name match is only worth anything past a couple of letters — two
     // characters light up half the vault and tell you nothing.
@@ -2376,10 +2380,12 @@ export class StrataView extends ItemView {
     const cy = this.cy;
     const hit = this.hits[i];
     if (!cy || !hit) return;
+    const node = cy.getElementById(hit.id) as NodeSingular;
+    // Nothing to show on the graph, so showing it means reading it.
+    if (node.empty()) return this.openHit(i);
     this.activeHit = i;
     this.listTucked = true;
     this.drawResults();
-    const node = cy.getElementById(hit.id) as NodeSingular;
     this.pinned = hit.id;
     this.showCard(node);
     this.pointAtHit(i);
@@ -3258,11 +3264,22 @@ export class StrataView extends ItemView {
     };
     box.createDiv({
       cls: "strata-card-sub strata-compound-foot",
-      text: "Every passage moves verbatim, and the original is kept whole in Full/.",
+      text: "Every passage moves verbatim, and the original is kept whole in Library/.",
     });
   }
 
   /** The card for a proposed link: what it would connect, and the button that does it. */
+  /**
+   * The judge's reason for a pair, when it has read them. Returns whether there
+   * was one, so the generic explanation can stand in when there was not.
+   */
+  private verdictLine(a: string, b: string): boolean {
+    const verdict = this.plugin.verdict(a, b);
+    if (!verdict?.why) return false;
+    this.cardEl.createDiv({ cls: "strata-card-why", text: verdict.why });
+    return true;
+  }
+
   private showSuggestion(edge: EdgeSingular) {
     const from = edge.source();
     const to = edge.target();
@@ -3278,6 +3295,8 @@ export class StrataView extends ItemView {
       cls: "strata-card-sub",
       text: `share ${shared.length} topics, link to each other from neither`,
     });
+
+    this.verdictLine(from.id(), to.id());
 
     const write = this.cardEl.createEl("button", { cls: "strata-open", text: "Write the link" });
     write.onclick = () => void this.writeLink(from.id(), to.id(), to.data("label") as string);
@@ -3322,12 +3341,14 @@ export class StrataView extends ItemView {
     ).length;
     meta.createSpan({ cls: "strata-tag", text: shared ? `${shared} shared topics` : "no shared topic" });
 
-    this.cardEl.createDiv({
-      cls: "strata-card-sub",
-      text: isEcho
-        ? "Near-identical. Either one of these should absorb the other, or they are deliberately separate and should say so."
-        : "Different topics, related language. The connection your tags could not have found.",
-    });
+    if (!this.verdictLine(from.id(), to.id())) {
+      this.cardEl.createDiv({
+        cls: "strata-card-sub",
+        text: isEcho
+          ? "Near-identical. Either one of these should absorb the other, or they are deliberately separate and should say so."
+          : "Different topics, related language. The connection your tags could not have found.",
+      });
+    }
 
     // The passages themselves, not a score. This is the difference between a
     // proposal you can judge and one you have to take on trust.

@@ -224,7 +224,10 @@ export class FindingsPanel {
       // off-frame cache meant an empty list said "nobody has computed it yet"
       // far more often than "nothing found", and the two look identical.
       const semantic: GEdge[] = this.plugin.index?.size
-        ? await this.plugin.index.pairs(graph, this.plugin.data.semantic)
+        ? this.plugin.judged(
+            await this.plugin.index.pairs(graph, this.plugin.data.semantic),
+            new Set(graph.nodes.map((n) => n.id))
+          )
         : [];
       const toPair = (e: GEdge): Pair => ({ a: e.source, b: e.target, score: e.similarity ?? 0 });
       const live = (e: GEdge) => !this.plugin.isDismissed(e.source, e.target);

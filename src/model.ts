@@ -1,4 +1,5 @@
 import { App, TFile } from "obsidian";
+import { searchOnly } from "./places";
 
 /** The kinds of node the vault schema knows about. */
 export type NodeKind = "note" | "topic" | "source" | "session" | "other";
@@ -161,20 +162,12 @@ function inferKind(file: TFile, declared: unknown): NodeKind {
 }
 
 /**
- * Two folders that are in the vault but not in the graph.
- *
- * `Full/` is the archive: the unsplit document a set of atoms was drawn from,
- * kept so nothing is lost and kept out because a 30,000-word original would
- * connect to every atom taken from it and drown them.
- *
- * `Inbox/` is the opposite end of the same idea — written but not yet filed.
- * It stays out because an unfiled note has no topics, so it would arrive as an
- * orphan every time and the graph would fill with things that are mid-decision
- * rather than decided.
+ * The folders that are in the vault but not in the graph — `Library/`,
+ * `Archive/` and `Inbox/`. What each is for, and why none is drawn, is in
+ * `places.ts`.
  */
 function isArchive(file: TFile, declared: unknown): boolean {
-  const folder = file.parent?.name;
-  return declared === "full" || folder === "Full" || folder === "Inbox";
+  return declared === "full" || searchOnly(file.path);
 }
 
 /**
@@ -430,11 +423,15 @@ export function suggestLinks(graph: Graph, minShared = 2): GEdge[] {
     }
   }
 
+  // Two dated entries filed under the same two topics are two days, not a
+  // missing link — see the same rule in the semantic pass.
+  const situational = new Set(graph.nodes.filter((n) => n.horizon === "situational").map((n) => n.id));
   const out: GEdge[] = [];
   for (const [key, count] of shared) {
     if (count < minShared) continue;
     const [a, b] = key.split("\u0000");
     if (linked.has(`${a} ${b}`)) continue;
+    if (situational.has(a) && situational.has(b)) continue;
     out.push({ id: `suggested:${a}>${b}`, source: a, target: b, layer: "suggested" });
   }
   return out;

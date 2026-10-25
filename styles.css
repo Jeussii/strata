@@ -712,6 +712,17 @@
   white-space: nowrap;
 }
 
+/* The judge's reason for a pair. A sentence, so it wraps, and set apart from
+   the one-line facts above it because it is an opinion rather than a count. */
+.strata-card-why {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-normal);
+  border-left: 2px solid color-mix(in srgb, var(--text-normal) 18%, transparent);
+  padding: 2px 0 2px 9px;
+  margin: 2px 0 12px;
+}
+
 /* Connections, two to a line. The mark is the layer's real line — this used
    to be written as `strata-legend-line`, a class with no rule anywhere in the
    stylesheet, so the card's colours have been invisible for as long as the

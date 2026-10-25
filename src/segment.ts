@@ -173,3 +173,55 @@ export function compound(raw: string, minChars = 2400, minSections = 3): Compoun
     marked: (body.match(/<!--\s*topics:/g) ?? []).length,
   };
 }
+
+// -------------------------------------------------------------- templates
+
+/** The segmenter's own heading: unindented. A `###` inside a list item is part of the item. */
+const HEADING = /^#{1,6}\s/;
+
+/**
+ * A line reduced to its words, so a template prompt matches however it is quoted.
+ *
+ * Mirrors `boiler_norm` in the MCP server's indexer character for character.
+ * The two only have to agree on membership, but a line they disagree on makes
+ * the same page hash differently on each side, and the two indexers re-embed
+ * it in turn forever.
+ */
+export function boilerNorm(line: string): string {
+  return line
+    .trim()
+    .replace(/^(>\s*)+/, "")
+    .replace(/^([-*+]|\d+[.)])\s+/, "")
+    .replace(/[*_`#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * The page minus every line that is template rather than writing.
+ *
+ * Journals were the reason. Two hundred of them share a printed prompt —
+ * "my most important task today", "I am grateful for", a placeholder under
+ * every question left blank — and a passage that is mostly
+ * prompt is mostly the same passage. Which lines count is decided across the
+ * whole vault, by the indexer in the MCP server, and written to
+ * `boilerplate.json`; this only applies the list.
+ *
+ * Headings stay, because they are where passages start and how a hit is
+ * addressed. A page with nothing removed comes back byte-identical, so its hash
+ * and its vectors do not move.
+ */
+export function stripBoilerplate(raw: string, lines: Set<string>): string {
+  if (!lines.size) return raw;
+  let front = "";
+  let body = raw;
+  if (raw.startsWith("---")) {
+    const end = raw.indexOf("\n---", 3);
+    if (end >= 0) {
+      front = raw.slice(0, end + 4);
+      body = raw.slice(end + 4);
+    }
+  }
+  return front + body.split("\n").filter((line) => HEADING.test(line) || !lines.has(boilerNorm(line))).join("\n");
+}

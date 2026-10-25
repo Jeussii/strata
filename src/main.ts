@@ -11,6 +11,22 @@ import { DEFAULT_FORCES, ForceSettings } from "./forces";
 import { Doc, sessionDocs, siblingDocs, vaultDoc } from "./docs";
 import { INBOX, fileTheObvious } from "./inbox";
 import type { Aspect } from "./aspect";
+import { LexicalIndex } from "./lexical";
+import type { GEdge } from "./model";
+import { searchOnly } from "./places";
+
+/**
+ * What a model made of a pair, after reading both pages.
+ *
+ * Written by the judging pass in the MCP server (`judge.py`), never here: the
+ * statistics propose, something that can read decides, and the plugin only
+ * honours the answer. `no` hides the pair everywhere, `duplicate` draws it as
+ * Echo whatever its score, `link` keeps it and puts the reason on its card.
+ */
+export interface Verdict {
+  v: "duplicate" | "link" | "no";
+  why?: string;
+}
 
 interface StrataData {
   /** Node positions, keyed by vault path. The arrangement is the user's work. */
@@ -31,6 +47,8 @@ interface StrataData {
    * removes it. Bumping this throws them away once.
    */
   layoutVersion: number;
+  /** Which semantic defaults the stored settings were migrated to. See `SEMANTIC_VERSION`. */
+  semanticVersion?: number;
   /** Whether the saved positions were laid out as separate fields, one per vault. */
   fieldSplit?: boolean;
   /**
@@ -79,6 +97,9 @@ interface StrataData {
   aspects: Record<string, Aspect>;
 }
 
+/** 2: bge-m3, and the cutoffs that go with it (2026-10-25). */
+const SEMANTIC_VERSION = 2;
+
 const DEFAULT_DATA: StrataData = {
   positions: {},
   linkedSessions: {},
@@ -101,6 +122,11 @@ export default class StrataPlugin extends Plugin {
   /** Notes changed since the model last read them; see `countStale`. */
   staleCount = 0;
   runner: IndexRunner | null = null;
+  /** The judge's verdicts, keyed like `dismissed`. */
+  verdicts = new Map<string, Verdict>();
+  /** The words half of search. Rebuilt lazily after anything in the vault changes. */
+  private lexical: LexicalIndex | null = null;
+  private lexicalBuild: Promise<LexicalIndex> | null = null;
 
   /**
    * Dragging a node fires constantly. Coalesce the writes so a minute of
@@ -112,6 +138,18 @@ export default class StrataPlugin extends Plugin {
     const stored = (await this.loadData()) as (Partial<StrataData> & { sessionCache?: unknown }) | null;
     this.data = Object.assign({}, DEFAULT_DATA, stored);
     this.data.semantic = Object.assign({}, DEFAULT_SEMANTIC, stored?.semantic);
+    // One move to bge-m3, for vaults still on nomic. Model and cutoffs go
+    // together: a nomic threshold under bge-m3 would read every pair as
+    // unrelated. The MCP server's indexer applies the same rule to the same
+    // file, so whichever side reads it first, both land on one model.
+    if ((stored?.semanticVersion ?? 1) < SEMANTIC_VERSION) {
+      if (this.data.semantic.model.startsWith("nomic-embed-text")) {
+        const { model, floor, echoAt } = DEFAULT_SEMANTIC;
+        Object.assign(this.data.semantic, { model, floor, echoAt });
+      }
+      this.data.semanticVersion = SEMANTIC_VERSION;
+      void this.saveData(this.data);
+    }
     // A fresh object, not the shared default: these are mutated by the sliders,
     // and assigning the constant straight in would edit it for the whole module.
     this.data.forces = Object.assign({}, DEFAULT_FORCES, stored?.forces);
@@ -223,6 +261,7 @@ export default class StrataPlugin extends Plugin {
       this.refreshSessionTopics();
       void (async () => {
         await this.index?.load();
+        await this.loadVerdicts();
         this.refreshViews();
         if (this.data.semantic.background) this.sweep();
         void this.fileInbox();
@@ -242,18 +281,22 @@ export default class StrataPlugin extends Plugin {
     // indexed inline: saving a file must not wait on an embedding.
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
+        this.lexical = null;
         if (file instanceof TFile && this.data.semantic.background)
           this.runner?.enqueue([vaultDoc(this.app, file)]);
       })
     );
+    this.registerEvent(this.app.vault.on("create", () => (this.lexical = null)));
     this.registerEvent(
       this.app.vault.on("rename", () => {
+        this.lexical = null;
         if (this.index?.prune(new Set(this.app.vault.getMarkdownFiles().map((f) => f.path)))) this.refreshViews();
         if (this.data.semantic.background) this.sweep();
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", () => {
+        this.lexical = null;
         if (this.index?.prune(new Set(this.app.vault.getMarkdownFiles().map((f) => f.path)))) this.refreshViews();
       })
     );
@@ -405,6 +448,12 @@ export default class StrataPlugin extends Plugin {
     void (async () => {
       const index = this.index;
       if (!index) return;
+      if (force) {
+        // Re-read is also how a fresh judging pass reaches an open graph.
+        await this.loadVerdicts();
+        this.lexical = null;
+        this.refreshViews();
+      }
       const files = await this.embeddable();
       index.prune(new Set(files.map((f) => f.key)));
       const todo = await index.stale(files, this.data.semantic);
@@ -431,14 +480,10 @@ export default class StrataPlugin extends Plugin {
   vaultNotes(): TFile[] {
     return this.app.vault.getMarkdownFiles().filter((f) => {
       const folder = f.parent?.name ?? "";
-      // `Full/` holds the unsplit original a set of atoms came out of. It is
-      // deliberately not a node and not embedded: it would echo against every
-      // atom taken from it, which is true and completely useless.
-      if (folder === "Topics" || folder === "Sources" || folder === "Full") return false;
-      // Written but not filed. Embedding it would put a note into the space
-      // before you have said what it is about, and the Inbox exists precisely so
-      // that decision has somewhere to be pending.
-      if (folder === "Inbox") return false;
+      if (folder === "Topics" || folder === "Sources") return false;
+      // Library, Archive and Inbox are searched but are not notes: they are
+      // added by `searchOnlyFiles`, and kept out of everything schema-bound.
+      if (searchOnly(f.path)) return false;
       const type = this.app.metadataCache.getFileCache(f)?.frontmatter?.type;
       return type !== "topic" && type !== "source" && type !== "full";
     });
@@ -455,9 +500,92 @@ export default class StrataPlugin extends Plugin {
   async embeddable(): Promise<Doc[]> {
     return [
       ...this.vaultNotes().map((f) => vaultDoc(this.app, f)),
+      ...this.searchOnlyFiles().map((f) => vaultDoc(this.app, f)),
       ...(await siblingDocs(this.app)),
       ...sessionDocs(Object.values(this.data.linkedSessions)),
     ];
+  }
+
+  /**
+   * Library, Archive and Inbox: read for search and for nothing else.
+   *
+   * `Full/` — what Library and Archive used to be — was skipped outright,
+   * because an original sits close to every atom taken out of it and would
+   * bury them in the graph. Still true of the graph, which never sees these
+   * pages. But skipping them in the index as well made every original nobody
+   * had split yet unfindable: on 2026-10-25 that was twenty of them, sixty
+   * thousand words, including two recorded conversations and an article clipped four days
+   * earlier. Nothing kept in the vault should be unfindable.
+   */
+  searchOnlyFiles(): TFile[] {
+    return this.app.vault.getMarkdownFiles().filter((f) => {
+      if (!searchOnly(f.path)) return false;
+      const type = this.app.metadataCache.getFileCache(f)?.frontmatter?.type;
+      return type !== "topic" && type !== "source";
+    });
+  }
+
+  /** The keyword index, built on first use after anything changed. */
+  async words(): Promise<LexicalIndex> {
+    if (this.lexical) return this.lexical;
+    if (!this.lexicalBuild) {
+      this.lexicalBuild = (async () => {
+        try {
+          const built = await LexicalIndex.build(await this.embeddable());
+          this.lexical = built;
+          return built;
+        } finally {
+          this.lexicalBuild = null;
+        }
+      })();
+    }
+    return this.lexicalBuild;
+  }
+
+  /** Re-read the judge's verdicts. Cheap, so it happens on every load and every Re-read. */
+  async loadVerdicts(): Promise<void> {
+    const path = `${this.manifest.dir ?? ".obsidian/plugins/strata"}/judgements.json`;
+    try {
+      if (!(await this.app.vault.adapter.exists(path))) return;
+      const raw = JSON.parse(await this.app.vault.adapter.read(path)) as {
+        pairs?: Record<string, Verdict>;
+      };
+      this.verdicts = new Map(Object.entries(raw.pairs ?? {}));
+    } catch (err) {
+      console.error("[strata] could not read the judgements", err);
+    }
+  }
+
+  verdict(a: string, b: string): Verdict | undefined {
+    return this.verdicts.get(StrataPlugin.pairKey(a, b));
+  }
+
+  /**
+   * The model's edges with the judge's verdicts applied.
+   *
+   * A pair judged `no` is gone; one judged a duplicate is Echo whatever its
+   * score said, and one judged a real link is Resonance even when its wording
+   * looked twice-written. Duplicates the statistics never proposed — the judge
+   * finds them by shared words — are added, between notes that are both drawn.
+   */
+  judged(edges: GEdge[], drawn: Set<string>): GEdge[] {
+    const out: GEdge[] = [];
+    const have = new Set<string>();
+    for (const edge of edges) {
+      if (this.isDismissed(edge.source, edge.target)) continue;
+      const verdict = this.verdict(edge.source, edge.target);
+      have.add(StrataPlugin.pairKey(edge.source, edge.target));
+      if (verdict && (edge.layer === "echo" || edge.layer === "resonance")) {
+        const layer = verdict.v === "duplicate" ? "echo" : "resonance";
+        out.push({ ...edge, layer, id: `${layer}:${edge.source}>${edge.target}` });
+      } else out.push(edge);
+    }
+    for (const [key, verdict] of this.verdicts) {
+      if (verdict.v !== "duplicate" || have.has(key)) continue;
+      const [a, b] = key.split("|");
+      if (drawn.has(a) && drawn.has(b)) out.push({ id: `echo:${a}>${b}`, source: a, target: b, layer: "echo", similarity: 1 });
+    }
+    return out;
   }
 
   /**
@@ -514,7 +642,8 @@ export default class StrataPlugin extends Plugin {
   }
 
   isDismissed(a: string, b: string): boolean {
-    return this.data.dismissed.includes(StrataPlugin.pairKey(a, b));
+    const key = StrataPlugin.pairKey(a, b);
+    return this.data.dismissed.includes(key) || this.verdicts.get(key)?.v === "no";
   }
 
   dismiss(a: string, b: string): void {

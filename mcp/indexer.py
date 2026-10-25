@@ -60,13 +60,27 @@ WORK = os.environ.get("STRATA_WORK") or os.path.join(OS_ROOT, "Work")
 PLUGIN = os.path.join(VAULT, ".obsidian", "plugins", "strata")
 INDEX_PATH = os.path.join(PLUGIN, "semantic-index.json")
 DATA_PATH = os.path.join(PLUGIN, "data.json")
+BOILER_PATH = os.path.join(PLUGIN, "boilerplate.json")
 TRANSCRIPTS = os.path.realpath(
     os.environ.get("STRATA_TRANSCRIPTS") or os.path.join(HOME, ".claude", "projects")
 )
 
-SKIP_VAULT_FOLDERS = {"Topics", "Sources", "Full", "Inbox"}
-SKIP_VAULT_TYPES = {"topic", "source", "full"}
-SKIP_WORK_PREFIX = ("Projects/", "Courses/", "Admin/")
+# Library, Archive and Inbox are read for search and nothing else (the graph
+# never draws them; see places.ts in the plugin). They used to be skipped
+# outright, as `Full/`, on the reasoning that an original is similar to every
+# atom taken out of it — true of the graph, but skipping them here as well made
+# twenty originals nobody had split simply unfindable: an article clipped on
+# 2026-10-21, two recorded conversations, three long transcripts. Sixty thousand words.
+# Only Topics and Sources stay out: their bodies are Dataview queries, not prose.
+SKIP_VAULT_FOLDERS = {"Topics", "Sources"}
+
+# A line is template rather than writing once it turns up in this many pages.
+BOILER_MIN_DOCS = 6
+BOILER_MIN_CHARS = 4
+SKIP_VAULT_TYPES = {"topic", "source"}
+# Admin is checklists, not thinking. Projects and courses each carry the one
+# paragraph saying what the thing is, which is worth finding.
+SKIP_WORK_PREFIX = ("Admin/",)
 
 
 # ----------------------------------------------------------------- segmenting
@@ -150,6 +164,99 @@ def segment(raw):
     return final
 
 
+# ---------------------------------------------------------------- templates
+
+
+# The segmenter's own test for a heading: unindented. A `###` inside a list
+# item is part of the item, and a template pasted as a nested list is still a
+# template.
+HEADING = re.compile(r"^#{1,6}\s")
+
+
+def boiler_norm(line):
+    """A line reduced to its words, so a template prompt matches however it is quoted.
+
+    Mirrors `boilerNorm` in segment.ts character for character. The two only
+    have to agree on membership, but if they disagree on one line the same page
+    hashes differently on each side and the two indexers re-embed it in turn.
+    """
+    s = line.strip()
+    s = re.sub(r"^(>\s*)+", "", s)
+    s = re.sub(r"^([-*+]|\d+[.)])\s+", "", s)
+    s = re.sub(r"[*_`#]", "", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _split_front(raw):
+    """Frontmatter and body, cut exactly where `body_of` cuts, without normalising."""
+    if not raw.startswith("---"):
+        return "", raw
+    end = raw.find("\n---", 3)
+    return ("", raw) if end < 0 else (raw[:end + 4], raw[end + 4:])
+
+
+def strip_boilerplate(raw, lines):
+    """The page minus every line that is template rather than writing.
+
+    Journals were the reason. Two hundred of them share a printed prompt —
+    "my most important task today", "I am grateful for", a placeholder under
+    every question left blank — and a passage that is mostly
+    prompt is mostly the same passage. Measured on 2026-10-25: 178 of the 205
+    pairs the Echo layer called near-duplicates were two journals sharing a
+    template and nothing else.
+
+    Headings stay, because they are where passages start and how a hit is
+    addressed — the same unindented headings the segmenter splits on. A page with nothing removed comes back byte-identical, so its
+    hash, and its vectors, do not move.
+    """
+    if not lines:
+        return raw
+    front, body = _split_front(raw)
+    kept = [ln for ln in body.split("\n")
+            if HEADING.match(ln) or boiler_norm(ln) not in lines]
+    return front + "\n".join(kept)
+
+
+def compute_boilerplate(docs):
+    """Every line that recurs across enough pages to be a template, sorted."""
+    counts = {}
+    for doc in docs:
+        if doc["key"].startswith("session:"):
+            continue
+        _front, body = _split_front(doc["text"])
+        seen = set()
+        for ln in body.split("\n"):
+            if HEADING.match(ln):
+                continue
+            norm = boiler_norm(ln)
+            if len(norm) >= BOILER_MIN_CHARS:
+                seen.add(norm)
+        for norm in seen:
+            counts[norm] = counts.get(norm, 0) + 1
+    return sorted(k for k, n in counts.items() if n >= BOILER_MIN_DOCS)
+
+
+def load_boilerplate():
+    """(rev, set of lines). Absent means no template is known yet, which is rev 0."""
+    try:
+        raw = json.loads(read_exact(BOILER_PATH))
+        return int(raw.get("rev") or 0), set(raw.get("lines") or [])
+    except (OSError, ValueError):
+        return 0, set()
+
+
+def save_boilerplate(lines):
+    """Write the template list if it changed. Returns its revision either way."""
+    rev = content_hash("\n".join(lines)) if lines else 0
+    if load_boilerplate()[0] != rev:
+        tmp = f"{BOILER_PATH}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            json.dump({"rev": rev, "minDocs": BOILER_MIN_DOCS, "lines": lines}, fh,
+                      ensure_ascii=False, indent=1)
+        os.replace(tmp, BOILER_PATH)
+    return rev
+
+
 def content_hash(text):
     """FNV-1a over UTF-16 code units, matching semantic.ts exactly.
 
@@ -166,9 +273,22 @@ def content_hash(text):
     return h
 
 
-def for_embedding(title, seg):
+# What each model must be told, and what its numbers mean — `PROFILES` in
+# semantic.ts. nomic wants a task prefix and bge-m3 none; and a cosine is not a
+# unit, so the cutoffs that turn one into a decision live with the model.
+PROFILES = {
+    "nomic-embed-text": {"prefix": "clustering: ", "meaning_floor": 0.55, "meaning_span": 0.30},
+    "bge-m3": {"prefix": "", "meaning_floor": 0.40, "meaning_span": 0.30},
+}
+
+
+def profile(model):
+    return PROFILES.get(model.replace(":latest", ""), {"prefix": "", "meaning_floor": 0.40, "meaning_span": 0.30})
+
+
+def for_embedding(title, seg, model):
     head = f"{title} — {seg['heading']}" if seg["heading"] else title
-    return f"clustering: {head}. {seg['text']}"[:SEG_CHARS]
+    return f"{profile(model)['prefix']}{head}. {seg['text']}"[:SEG_CHARS]
 
 
 def read_exact(path):
@@ -347,17 +467,35 @@ def load_index():
     return raw
 
 
-def settings():
-    """Host and embedding model, read from the plugin's own settings."""
-    host, model = "http://localhost:11434", "nomic-embed-text"
+# The plugin's defaults and its one migration, mirrored (main.ts, semantic.ts).
+SEMANTIC_VERSION = 2
+DEFAULT_SEMANTIC = {"host": "http://localhost:11434", "model": "bge-m3", "k": 4,
+                    "floor": 0.59, "echoAt": 0.85}
+
+
+def semantic_settings():
+    """The plugin's semantic settings, migrated exactly as the plugin migrates them.
+
+    Applied on read rather than written back: data.json belongs to Obsidian while
+    it runs. If the plugin has not yet moved a vault off nomic, this side reads
+    the same file and lands on the same answer, so the two never index with
+    different models — which would make each wipe the other's vectors in turn.
+    """
+    sem = dict(DEFAULT_SEMANTIC)
     try:
         data = json.loads(read_exact(DATA_PATH))
-        sem = data.get("semantic") or {}
-        host = sem.get("host") or host
-        model = sem.get("model") or model
+        sem.update({k: v for k, v in (data.get("semantic") or {}).items() if v not in (None, "")})
+        if (data.get("semanticVersion") or 1) < SEMANTIC_VERSION and sem["model"].startswith("nomic-embed-text"):
+            sem.update({k: DEFAULT_SEMANTIC[k] for k in ("model", "floor", "echoAt")})
     except Exception:
         pass
-    return host, model
+    return sem
+
+
+def settings():
+    """Host and embedding model."""
+    sem = semantic_settings()
+    return sem["host"], sem["model"]
 
 
 def is_local(host):
@@ -365,7 +503,7 @@ def is_local(host):
     return re.match(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/?$", host.strip()) is not None
 
 
-def survey(docs, index, model):
+def survey(docs, index, model, boiler=None):
     """Which docs the index no longer speaks for, and which entries are orphans.
 
     mtime first because it is free, hash second because it is authoritative —
@@ -375,6 +513,10 @@ def survey(docs, index, model):
     """
     if index.get("model") and index["model"] != model:
         return list(docs), set(), True, 0
+    rev, lines = boiler if boiler is not None else load_boilerplate()
+    # A new template list changes what a page embeds as without changing the
+    # file, so the free mtime check cannot be trusted until every hash is redone.
+    every = index.get("boilerRev", 0) != rev
     entries = index.get("entries", {})
     stale, touched = [], {}
     for doc in docs:
@@ -382,10 +524,13 @@ def survey(docs, index, model):
         if entry is None:
             stale.append(doc)
             continue
-        if entry.get("m") == doc["mtime"]:
+        if not every and entry.get("m") == doc["mtime"]:
             continue
-        if content_hash(doc["text"]) != entry.get("c"):
+        if content_hash(strip_boilerplate(doc["text"], lines)) != entry.get("c"):
             stale.append(doc)
+            # Forget the mtime, so a page left over by `limit` is still found
+            # once the revision below has been recorded.
+            entry["m"] = -1
         else:
             touched[doc["key"]] = doc["mtime"]   # touched, not changed
     alive = {d["key"] for d in docs}
@@ -419,9 +564,14 @@ def refresh(render_session, limit=None, log=None):
     host, model = settings()
     index = load_index()
     docs = all_docs(render_session)
-    stale, gone, model_changed, touched = survey(docs, index, model)
+    lines = compute_boilerplate(docs)
+    rev = save_boilerplate(lines)
+    lines = set(lines)
+    stale, gone, model_changed, touched = survey(docs, index, model, (rev, lines))
     if model_changed:
         index = {"version": CACHE_VERSION, "model": "", "entries": {}}
+    retemplated = index.get("boilerRev", 0) != rev
+    index["boilerRev"] = rev
 
     entries = index.setdefault("entries", {})
     for key in gone:
@@ -432,19 +582,20 @@ def refresh(render_session, limit=None, log=None):
         stale = stale[:limit]
     done = 0
     for doc in stale:
-        segs = segment(doc["text"])
+        text = strip_boilerplate(doc["text"], lines)
+        segs = segment(text)
         if not segs:
             # All title and no thought. Recorded empty so it is not retried.
-            entries[doc["key"]] = {"m": doc["mtime"], "c": content_hash(doc["text"]), "segs": []}
+            entries[doc["key"]] = {"m": doc["mtime"], "c": content_hash(text), "segs": []}
             done += 1
             continue
         vectors = []
         for i in range(0, len(segs), BATCH):
             batch = segs[i:i + BATCH]
-            vectors.extend(embed(host, model, [for_embedding(doc["title"], s) for s in batch]))
+            vectors.extend(embed(host, model, [for_embedding(doc["title"], s, model) for s in batch]))
         entries[doc["key"]] = {
             "m": doc["mtime"],
-            "c": content_hash(doc["text"]),
+            "c": content_hash(text),
             "segs": [{"v": to_b64(vectors[i]), "h": s["heading"], "p": s["text"][:PREVIEW]}
                      for i, s in enumerate(segs)],
         }
@@ -453,7 +604,7 @@ def refresh(render_session, limit=None, log=None):
             log(doc["key"])
 
     index["model"] = model
-    if done or gone or touched or not os.path.exists(INDEX_PATH):
+    if done or gone or touched or retemplated or not os.path.exists(INDEX_PATH):
         write_index(index)
     return {
         "indexed": done,
